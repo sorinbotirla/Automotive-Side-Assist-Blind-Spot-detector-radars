@@ -29,6 +29,17 @@ var RadarLogger = function(){
         rcwlRight: null
     };
 
+    _self.shading = {
+        left: [],
+        right: []
+    };
+
+    _self.pending = {
+        seq: 0,
+        latestSeqByKey: {},
+        timersByKey: {}
+    };
+
     _self.qs = function(name){
         var re = new RegExp("[?&]" + name + "=([^&]+)"),
             m = re.exec(window.location.search);
@@ -53,6 +64,12 @@ var RadarLogger = function(){
         el.attr("class", isError ? "status error" : "status ok");
     };
 
+    _self.setAck = function(msg){
+        var el = $("#ackLine");
+        if (!el.length) return;
+        el.text("ACK: " + (msg || "none"));
+    };
+
     _self.showNav = function(){
         var prev = $("#prevChunk"),
             next = $("#nextChunk"),
@@ -73,13 +90,6 @@ var RadarLogger = function(){
         if (meta.length) {
             meta.text("file=" + _self.state.logName + " offset=" + _self.state.offset + " count=" + _self.state.lastCount);
         }
-    };
-
-
-    _self.pending = {
-        seq: 0,
-        latestSeqByKey: {},
-        timersByKey: {}
     };
 
     _self.handleEvents = function(){
@@ -118,7 +128,6 @@ var RadarLogger = function(){
         }
 
         if(_self.state.isSettingsPage){
-            // number inputs: send while typing (debounced) + also on blur for final commit
             $(document).on("input", ".settingsGrid input", function(e){
                 var id = $(this).attr("id") || "",
                     val = $(this).val();
@@ -133,7 +142,6 @@ var RadarLogger = function(){
                 _self.settingsSetNow(id, val);
             });
 
-            // selects: change is enough
             $(document).on("change", ".settingsGrid select", function(e){
                 var id = $(this).attr("id") || "",
                     val = $(this).val();
@@ -157,12 +165,11 @@ var RadarLogger = function(){
     };
 
     _self.settingsSetNow = function(key, value){
-        // bump sequence and remember what is the latest request for this key
+        var t = _self.pending.timersByKey[key];
+
         _self.pending.seq++;
         _self.pending.latestSeqByKey[key] = _self.pending.seq;
 
-        // kill any pending debounce for this key
-        var t = _self.pending.timersByKey[key];
         if (t) {
             clearTimeout(t);
             _self.pending.timersByKey[key] = null;
@@ -177,7 +184,6 @@ var RadarLogger = function(){
         _self.setStatus("Applying " + key + " = " + value, false);
 
         _self.apiGet(url, function(code, txt){
-            // ignore stale responses
             if (_self.pending.latestSeqByKey[key] !== seq) return;
 
             if(code !== 200){
@@ -189,7 +195,7 @@ var RadarLogger = function(){
                 var o = JSON.parse(txt),
                     ack = (o && o.ack) ? o.ack : "";
 
-                if (ack) $("#ackLine").text("ACK: " + ack);
+                if (ack) _self.setAck(ack);
                 _self.setStatus("Applied: " + key + " = " + value, false);
             }catch(e){
                 _self.setStatus("set parse error", true);
@@ -216,10 +222,10 @@ var RadarLogger = function(){
         html += "<span id=\"chunkMeta\" class=\"meta\"></span>";
         html += "</div>";
 
-        html += "<div class=\"gtitle\">HB100 Left (raw)</div>";
+        html += "<div class=\"gtitle\">HB100 Left</div>";
         html += "<div id=\"graphHbLeft\" class=\"dyg\" style=\"width:100%; height:220px;\"></div>";
 
-        html += "<div class=\"gtitle\">HB100 Right (raw)</div>";
+        html += "<div class=\"gtitle\">HB100 Right</div>";
         html += "<div id=\"graphHbRight\" class=\"dyg\" style=\"width:100%; height:220px;\"></div>";
 
         html += "<div class=\"gtitle\">RCWL Left (0/1)</div>";
@@ -343,7 +349,36 @@ var RadarLogger = function(){
         _self.loadChunk();
     };
 
-    _self.ensureDygraph = function(key, elId, labels, color, yOpt){
+    _self.makeUnderlay = function(side){
+        return function(ctx, area, g){
+            var spans = (side === "left") ? _self.shading.left : _self.shading.right,
+                i = 0;
+
+            if (!spans || !spans.length) return;
+
+            ctx.save();
+            ctx.fillStyle = "rgba(255, 235, 59, 0.22)";
+
+            for(i=0;i<spans.length;i++){
+                var a = spans[i][0],
+                    b = spans[i][1],
+                    x1 = g.toDomXCoord(a),
+                    x2 = g.toDomXCoord(b);
+
+                if (x2 < area.x) continue;
+                if (x1 > area.x + area.w) continue;
+
+                if (x1 < area.x) x1 = area.x;
+                if (x2 > area.x + area.w) x2 = area.x + area.w;
+
+                ctx.fillRect(x1, area.y, (x2 - x1), area.h);
+            }
+
+            ctx.restore();
+        };
+    };
+
+    _self.ensureDygraph = function(key, elId, labels, color, yOpt, shadeSide){
         var el = document.getElementById(elId),
             opts = null;
 
@@ -373,6 +408,10 @@ var RadarLogger = function(){
             yLabelWidth: 50
         };
 
+        if (shadeSide) {
+            opts.underlayCallback = _self.makeUnderlay(shadeSide);
+        }
+
         if (yOpt && typeof yOpt === "object") {
             if (typeof yOpt.valueRangeMin !== "undefined" && typeof yOpt.valueRangeMax !== "undefined") {
                 opts.valueRange = [yOpt.valueRangeMin, yOpt.valueRangeMax];
@@ -388,12 +427,46 @@ var RadarLogger = function(){
         _self.graphs[key].updateOptions({ file: rows });
     };
 
+    _self.computeSpans = function(tArr, flagArr){
+        var spans = [],
+            i = 0,
+            inOn = 0,
+            startT = 0;
+
+        if (!tArr || !flagArr) return spans;
+        if (tArr.length !== flagArr.length) return spans;
+        if (tArr.length < 2) return spans;
+
+        for(i=0;i<tArr.length;i++){
+            var on = flagArr[i] ? 1 : 0,
+                t = tArr[i];
+
+            if (!inOn && on) {
+                inOn = 1;
+                startT = t;
+            } else if (inOn && !on) {
+                inOn = 0;
+                spans.push([startT, t]);
+            }
+        }
+
+        if (inOn) {
+            spans.push([startT, tArr[tArr.length - 1]]);
+        }
+
+        return spans;
+    };
+
     _self.parseChunk = function(txt){
         var lines = txt.split("\n"),
             hbL = [],
             hbR = [],
             rcL = [],
             rcR = [],
+            tL = [],
+            tR = [],
+            ledLFlags = [],
+            ledRFlags = [],
             count = 0,
             i = 0,
             lastTs = -1;
@@ -401,14 +474,14 @@ var RadarLogger = function(){
         for(i=0;i<lines.length;i++){
             var line = $.trim(lines[i]),
                 p = null,
-                l = 0, r = 0, rl = 0, rr = 0,
+                l = 0, r = 0, rl = 0, rr = 0, ledL = 0, ledR = 0,
                 tsMs = 0,
                 t = 0;
 
             if(!line) continue;
 
             p = line.split(",");
-            if(p.length < 4) continue;
+            if(p.length < 5) continue;
 
             l = parseInt($.trim(p[0]), 10);
             r = parseInt($.trim(p[1]), 10);
@@ -417,11 +490,18 @@ var RadarLogger = function(){
 
             if(isNaN(l) || isNaN(r) || isNaN(rl) || isNaN(rr)) continue;
 
-            if (p.length >= 5) {
-                tsMs = parseInt($.trim(p[4]), 10);
+            if (p.length >= 7) {
+                ledL = parseInt($.trim(p[4]), 10);
+                ledR = parseInt($.trim(p[5]), 10);
+                tsMs = parseInt($.trim(p[6]), 10);
+                if (isNaN(ledL)) ledL = 0;
+                if (isNaN(ledR)) ledR = 0;
                 if (isNaN(tsMs)) tsMs = 0;
             } else {
-                tsMs = count * 100;
+                tsMs = parseInt($.trim(p[4]), 10);
+                if (isNaN(tsMs)) tsMs = 0;
+                ledL = 0;
+                ledR = 0;
             }
 
             if (tsMs <= lastTs) continue;
@@ -434,8 +514,17 @@ var RadarLogger = function(){
             rcL.push([t, (rl ? 1 : 0)]);
             rcR.push([t, (rr ? 1 : 0)]);
 
+            tL.push(t);
+            tR.push(t);
+
+            ledLFlags.push(ledL ? 1 : 0);
+            ledRFlags.push(ledR ? 1 : 0);
+
             count++;
         }
+
+        _self.shading.left = _self.computeSpans(tL, ledLFlags);
+        _self.shading.right = _self.computeSpans(tR, ledRFlags);
 
         return { count: count, hbL: hbL, hbR: hbR, rcL: rcL, rcR: rcR };
     };
@@ -460,11 +549,11 @@ var RadarLogger = function(){
 
             _self.setStatus("file=" + _self.state.logName + " offset=" + _self.state.offset + " count=" + _self.state.lastCount, false);
 
-            _self.ensureDygraph("hbLeft", "graphHbLeft", ["t", "HB100 Left"], _self.colors.hbLeft, { ylabel: "raw" });
-            _self.ensureDygraph("hbRight", "graphHbRight", ["t", "HB100 Right"], _self.colors.hbRight, { ylabel: "raw" });
+            _self.ensureDygraph("hbLeft", "graphHbLeft", ["t", "HB100 Left"], _self.colors.hbLeft, { ylabel: "val" }, "left");
+            _self.ensureDygraph("hbRight", "graphHbRight", ["t", "HB100 Right"], _self.colors.hbRight, { ylabel: "val" }, "right");
 
-            _self.ensureDygraph("rcwlLeft", "graphRcwlLeft", ["t", "RCWL Left"], _self.colors.rcwlLeft, { ylabel: "0/1", valueRangeMin: -0.1, valueRangeMax: 1.1 });
-            _self.ensureDygraph("rcwlRight", "graphRcwlRight", ["t", "RCWL Right"], _self.colors.rcwlRight, { ylabel: "0/1", valueRangeMin: -0.1, valueRangeMax: 1.1 });
+            _self.ensureDygraph("rcwlLeft", "graphRcwlLeft", ["t", "RCWL Left"], _self.colors.rcwlLeft, { ylabel: "0/1", valueRangeMin: -0.1, valueRangeMax: 1.1 }, "left");
+            _self.ensureDygraph("rcwlRight", "graphRcwlRight", ["t", "RCWL Right"], _self.colors.rcwlRight, { ylabel: "0/1", valueRangeMin: -0.1, valueRangeMax: 1.1 }, "right");
 
             _self.setDyData("hbLeft", parsed.hbL);
             _self.setDyData("hbRight", parsed.hbR);
@@ -481,12 +570,33 @@ var RadarLogger = function(){
     };
 
     _self.settingsPopulate = function(o){
-        var v = null;
+        var v = "";
 
         if(!o) return;
 
         v = (typeof o.MIN_AMPLITUDE !== "undefined") ? o.MIN_AMPLITUDE : "";
         $("#MIN_AMPLITUDE").val(v);
+
+        v = (typeof o.MIN_AMPLITUDE_LEFT !== "undefined") ? o.MIN_AMPLITUDE_LEFT : "";
+        $("#MIN_AMPLITUDE_LEFT").val(v);
+
+        v = (typeof o.MIN_AMPLITUDE_RIGHT !== "undefined") ? o.MIN_AMPLITUDE_RIGHT : "";
+        $("#MIN_AMPLITUDE_RIGHT").val(v);
+
+        v = (typeof o.NOISE_MULT_LEFT !== "undefined") ? o.NOISE_MULT_LEFT : "";
+        $("#NOISE_MULT_LEFT").val(v);
+
+        v = (typeof o.NOISE_MULT_RIGHT !== "undefined") ? o.NOISE_MULT_RIGHT : "";
+        $("#NOISE_MULT_RIGHT").val(v);
+
+        v = (typeof o.NOISE_OFFSET_LEFT !== "undefined") ? o.NOISE_OFFSET_LEFT : "";
+        $("#NOISE_OFFSET_LEFT").val(v);
+
+        v = (typeof o.NOISE_OFFSET_RIGHT !== "undefined") ? o.NOISE_OFFSET_RIGHT : "";
+        $("#NOISE_OFFSET_RIGHT").val(v);
+
+        v = (typeof o.NOISE_ALPHA_SHIFT !== "undefined") ? o.NOISE_ALPHA_SHIFT : "";
+        $("#NOISE_ALPHA_SHIFT").val(v);
 
         v = (typeof o.MOTION_HOLD_MS !== "undefined") ? o.MOTION_HOLD_MS : "";
         $("#MOTION_HOLD_MS").val(v);
@@ -514,6 +624,7 @@ var RadarLogger = function(){
             try{
                 var o = JSON.parse(txt);
                 _self.settingsPopulate(o);
+                _self.setAck("none");
                 _self.setStatus("Settings loaded", false);
             }catch(e){
                 _self.setStatus("settings parse error", true);
@@ -541,28 +652,6 @@ var RadarLogger = function(){
                 return;
             }
             _self.setStatus("Saved to SD", false);
-        });
-    };
-
-    _self.settingsSet = function(key, value){
-        var url = "/api/settings/set?key=" + encodeURIComponent(key) + "&value=" + encodeURIComponent(value);
-
-        _self.setStatus("Sending " + key + " ...", false);
-
-        _self.apiGet(url, function(code, txt){
-            if(code !== 200){
-                _self.setStatus("set error (" + code + ")", true);
-                return;
-            }
-            try{
-                var o = JSON.parse(txt),
-                    ack = (o && o.ack) ? o.ack : "";
-
-                if (ack) $("#ackLine").text("ACK: " + ack);
-                _self.setStatus("Applied: " + key, false);
-            }catch(e){
-                _self.setStatus("set parse error", true);
-            }
         });
     };
 

@@ -19,7 +19,6 @@ WebServer server(80);
 
 static bool httpStarted = false;
 static bool sdMissingPrinted = false;
-
 static bool sdOk = false;
 
 static bool loggingEnabled = false;
@@ -28,7 +27,7 @@ static unsigned long logStartMs = 0;
 static unsigned long flushLastMs = 0;
 
 static const int BATCH_LINES = 100;
-static const int LINE_BYTES = 64;
+static const int LINE_BYTES = 80;
 static const int OUTBUF_MAX = BATCH_LINES * LINE_BYTES;
 
 static char outbuf[OUTBUF_MAX];
@@ -41,9 +40,24 @@ static String wifiSsid = "";
 static String wifiPass = "";
 
 static const char *SETTINGS_PATH = "/settings/radarsettings.json";
+static const char *LOG_DIR = "/logs";
 
-// Settings stored on ESP and pushed to Arduino
+// Backward compatible settings for old UI
 static int settings_MIN_AMPLITUDE = 80;
+
+// Option 3 adaptive settings
+static int settings_MIN_AMPLITUDE_LEFT = 80;
+static int settings_MIN_AMPLITUDE_RIGHT = 80;
+
+static int settings_NOISE_MULT_LEFT = 40;
+static int settings_NOISE_MULT_RIGHT = 40;
+
+static int settings_NOISE_OFFSET_LEFT = 0;
+static int settings_NOISE_OFFSET_RIGHT = 0;
+
+static int settings_NOISE_ALPHA_SHIFT = 7;
+
+// Other existing settings
 static unsigned long settings_MOTION_HOLD_MS = 500;
 static int settings_EVENTS_TO_TRIGGER = 1;
 static unsigned long settings_RCWL_MIN_ACTIVE_MS = 1000;
@@ -56,6 +70,17 @@ static String trimLine(String s) {
   s.replace("\r", "");
   s.trim();
   return s;
+}
+
+static String joinPath(const String &a, const String &b) {
+  if (a.endsWith("/")) return a + b;
+  return a + "/" + b;
+}
+
+static bool ensureDir(const char *path) {
+  if (!sdOk) return false;
+  if (SD.exists(path)) return true;
+  return SD.mkdir(path);
 }
 
 static bool readWifiCredentialsFromSD() {
@@ -152,7 +177,9 @@ static void flushBatchToSD() {
   if (currentLogName.length() == 0) return;
   if (outlen <= 0) return;
 
-  File f = SD.open(("/" + currentLogName).c_str(), FILE_APPEND);
+  String path = joinPath(String(LOG_DIR), currentLogName);
+
+  File f = SD.open(path.c_str(), FILE_APPEND);
   if (!f) {
     outlen = 0;
     outLines = 0;
@@ -171,7 +198,7 @@ static int findNextLogIndex() {
 
   if (!sdOk) return 1;
 
-  File root = SD.open("/");
+  File root = SD.open(LOG_DIR);
   if (!root) return 1;
 
   File entry = root.openNextFile();
@@ -180,6 +207,10 @@ static int findNextLogIndex() {
     entry.close();
 
     name.toLowerCase();
+
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+
     if (name.startsWith("radarlog") && name.endsWith(".log")) {
       String mid = name.substring(String("radarlog").length(), name.length() - String(".log").length());
       int n = mid.toInt();
@@ -199,19 +230,23 @@ static void startLogging() {
     return;
   }
 
+  ensureDir(LOG_DIR);
+
   flushBatchToSD();
 
   int idx = findNextLogIndex();
   currentLogName = "radarlog" + String(idx) + ".log";
 
-  File f = SD.open(("/" + currentLogName).c_str(), FILE_WRITE);
+  String path = joinPath(String(LOG_DIR), currentLogName);
+
+  File f = SD.open(path.c_str(), FILE_WRITE);
   if (f) {
     f.close();
     loggingEnabled = true;
     logStartMs = millis();
     flushLastMs = millis();
     Serial.print("logging started: ");
-    Serial.println(currentLogName);
+    Serial.println(path);
   } else {
     loggingEnabled = false;
     currentLogName = "";
@@ -238,8 +273,22 @@ static String jsonEscape(const String &s) {
 }
 
 static String settingsToJson() {
+  settings_MIN_AMPLITUDE = settings_MIN_AMPLITUDE_LEFT;
+
   String body = "{";
   body += "\"MIN_AMPLITUDE\":"; body += String(settings_MIN_AMPLITUDE); body += ",";
+
+  body += "\"MIN_AMPLITUDE_LEFT\":"; body += String(settings_MIN_AMPLITUDE_LEFT); body += ",";
+  body += "\"MIN_AMPLITUDE_RIGHT\":"; body += String(settings_MIN_AMPLITUDE_RIGHT); body += ",";
+
+  body += "\"NOISE_MULT_LEFT\":"; body += String(settings_NOISE_MULT_LEFT); body += ",";
+  body += "\"NOISE_MULT_RIGHT\":"; body += String(settings_NOISE_MULT_RIGHT); body += ",";
+
+  body += "\"NOISE_OFFSET_LEFT\":"; body += String(settings_NOISE_OFFSET_LEFT); body += ",";
+  body += "\"NOISE_OFFSET_RIGHT\":"; body += String(settings_NOISE_OFFSET_RIGHT); body += ",";
+
+  body += "\"NOISE_ALPHA_SHIFT\":"; body += String(settings_NOISE_ALPHA_SHIFT); body += ",";
+
   body += "\"MOTION_HOLD_MS\":"; body += String(settings_MOTION_HOLD_MS); body += ",";
   body += "\"EVENTS_TO_TRIGGER\":"; body += String(settings_EVENTS_TO_TRIGGER); body += ",";
   body += "\"RCWL_MIN_ACTIVE_MS\":"; body += String(settings_RCWL_MIN_ACTIVE_MS); body += ",";
@@ -308,6 +357,12 @@ static bool jsonReadBool(const String &json, const char *key, bool &outVal) {
   return false;
 }
 
+static int clampInt(int v, int lo, int hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
+}
+
 static bool readSettingsFromSD() {
   if (!sdOk) return false;
   if (!SD.exists(SETTINGS_PATH)) return false;
@@ -330,12 +385,41 @@ static bool readSettingsFromSD() {
   long li = 0;
   bool lb = false;
 
-  if (jsonReadInt(json, "MIN_AMPLITUDE", li)) settings_MIN_AMPLITUDE = (int)li;
+  if (jsonReadInt(json, "MIN_AMPLITUDE", li)) {
+    settings_MIN_AMPLITUDE = (int)li;
+    settings_MIN_AMPLITUDE_LEFT = settings_MIN_AMPLITUDE;
+    settings_MIN_AMPLITUDE_RIGHT = settings_MIN_AMPLITUDE;
+  }
+
+  if (jsonReadInt(json, "MIN_AMPLITUDE_LEFT", li)) settings_MIN_AMPLITUDE_LEFT = (int)li;
+  if (jsonReadInt(json, "MIN_AMPLITUDE_RIGHT", li)) settings_MIN_AMPLITUDE_RIGHT = (int)li;
+
+  if (jsonReadInt(json, "NOISE_MULT_LEFT", li)) settings_NOISE_MULT_LEFT = (int)li;
+  if (jsonReadInt(json, "NOISE_MULT_RIGHT", li)) settings_NOISE_MULT_RIGHT = (int)li;
+
+  if (jsonReadInt(json, "NOISE_OFFSET_LEFT", li)) settings_NOISE_OFFSET_LEFT = (int)li;
+  if (jsonReadInt(json, "NOISE_OFFSET_RIGHT", li)) settings_NOISE_OFFSET_RIGHT = (int)li;
+
+  if (jsonReadInt(json, "NOISE_ALPHA_SHIFT", li)) settings_NOISE_ALPHA_SHIFT = (int)li;
+
   if (jsonReadInt(json, "MOTION_HOLD_MS", li)) settings_MOTION_HOLD_MS = (unsigned long)li;
   if (jsonReadInt(json, "EVENTS_TO_TRIGGER", li)) settings_EVENTS_TO_TRIGGER = (int)li;
   if (jsonReadInt(json, "RCWL_MIN_ACTIVE_MS", li)) settings_RCWL_MIN_ACTIVE_MS = (unsigned long)li;
   if (jsonReadBool(json, "ENABLE_RCWL_LEFT", lb)) settings_ENABLE_RCWL_LEFT = lb;
   if (jsonReadBool(json, "ENABLE_RCWL_RIGHT", lb)) settings_ENABLE_RCWL_RIGHT = lb;
+
+  settings_MIN_AMPLITUDE_LEFT = clampInt(settings_MIN_AMPLITUDE_LEFT, 0, 1023);
+  settings_MIN_AMPLITUDE_RIGHT = clampInt(settings_MIN_AMPLITUDE_RIGHT, 0, 1023);
+
+  settings_NOISE_MULT_LEFT = clampInt(settings_NOISE_MULT_LEFT, 0, 300);
+  settings_NOISE_MULT_RIGHT = clampInt(settings_NOISE_MULT_RIGHT, 0, 300);
+
+  settings_NOISE_OFFSET_LEFT = clampInt(settings_NOISE_OFFSET_LEFT, -1023, 1023);
+  settings_NOISE_OFFSET_RIGHT = clampInt(settings_NOISE_OFFSET_RIGHT, -1023, 1023);
+
+  settings_NOISE_ALPHA_SHIFT = clampInt(settings_NOISE_ALPHA_SHIFT, 4, 12);
+
+  settings_MIN_AMPLITUDE = settings_MIN_AMPLITUDE_LEFT;
 
   return true;
 }
@@ -362,7 +446,17 @@ static void sendCmdToArduino(const String &key, const String &val) {
 }
 
 static void pushAllSettingsToArduino() {
-  sendCmdToArduino("MIN_AMPLITUDE", String(settings_MIN_AMPLITUDE));
+  sendCmdToArduino("MIN_AMPLITUDE_LEFT", String(settings_MIN_AMPLITUDE_LEFT));
+  sendCmdToArduino("MIN_AMPLITUDE_RIGHT", String(settings_MIN_AMPLITUDE_RIGHT));
+
+  sendCmdToArduino("NOISE_MULT_LEFT", String(settings_NOISE_MULT_LEFT));
+  sendCmdToArduino("NOISE_MULT_RIGHT", String(settings_NOISE_MULT_RIGHT));
+
+  sendCmdToArduino("NOISE_OFFSET_LEFT", String(settings_NOISE_OFFSET_LEFT));
+  sendCmdToArduino("NOISE_OFFSET_RIGHT", String(settings_NOISE_OFFSET_RIGHT));
+
+  sendCmdToArduino("NOISE_ALPHA_SHIFT", String(settings_NOISE_ALPHA_SHIFT));
+
   sendCmdToArduino("MOTION_HOLD_MS", String(settings_MOTION_HOLD_MS));
   sendCmdToArduino("EVENTS_TO_TRIGGER", String(settings_EVENTS_TO_TRIGGER));
   sendCmdToArduino("RCWL_MIN_ACTIVE_MS", String(settings_RCWL_MIN_ACTIVE_MS));
@@ -385,7 +479,7 @@ static void handleApiList() {
   bool first = true;
 
   if (sdOk) {
-    File root = SD.open("/");
+    File root = SD.open(LOG_DIR);
     if (root) {
       File entry = root.openNextFile();
       while (entry) {
@@ -393,6 +487,9 @@ static void handleApiList() {
         entry.close();
 
         name.toLowerCase();
+        int slash = name.lastIndexOf('/');
+        if (slash >= 0) name = name.substring(slash + 1);
+
         if (name.startsWith("radarlog") && name.endsWith(".log")) {
           if (!first) body += ",";
           first = false;
@@ -450,7 +547,9 @@ static void handleApiChunk() {
   if (limit < 1) limit = 1;
   if (limit > 2000) limit = 2000;
 
-  File f = SD.open(("/" + name).c_str(), FILE_READ);
+  String path = joinPath(String(LOG_DIR), name);
+
+  File f = SD.open(path.c_str(), FILE_READ);
   if (!f) {
     server.send(404, "text/plain", "not found");
     return;
@@ -509,7 +608,8 @@ static void handleApiDelete() {
     }
   }
 
-  String path = "/" + name;
+  String path = joinPath(String(LOG_DIR), name);
+
   if (!SD.exists(path.c_str())) {
     server.send(404, "text/plain", "not found");
     return;
@@ -539,22 +639,42 @@ static void handleApiSettingsReload() {
 }
 
 static bool applySettingKeyValue(const String &key, const String &val) {
-  String k = key;
-  String v = val;
+  String k = key, v = val, x = "";
+  long li = 0;
   k.trim();
   v.trim();
 
-  if (k == "MIN_AMPLITUDE") { settings_MIN_AMPLITUDE = v.toInt(); return true; }
+  if (k == "MIN_AMPLITUDE") {
+    li = v.toInt();
+    settings_MIN_AMPLITUDE = (int)li;
+    settings_MIN_AMPLITUDE_LEFT = settings_MIN_AMPLITUDE;
+    settings_MIN_AMPLITUDE_RIGHT = settings_MIN_AMPLITUDE;
+    return true;
+  }
+
+  if (k == "MIN_AMPLITUDE_LEFT") { settings_MIN_AMPLITUDE_LEFT = v.toInt(); settings_MIN_AMPLITUDE = settings_MIN_AMPLITUDE_LEFT; return true; }
+  if (k == "MIN_AMPLITUDE_RIGHT") { settings_MIN_AMPLITUDE_RIGHT = v.toInt(); return true; }
+
+  if (k == "NOISE_MULT_LEFT") { settings_NOISE_MULT_LEFT = v.toInt(); return true; }
+  if (k == "NOISE_MULT_RIGHT") { settings_NOISE_MULT_RIGHT = v.toInt(); return true; }
+
+  if (k == "NOISE_OFFSET_LEFT") { settings_NOISE_OFFSET_LEFT = v.toInt(); return true; }
+  if (k == "NOISE_OFFSET_RIGHT") { settings_NOISE_OFFSET_RIGHT = v.toInt(); return true; }
+
+  if (k == "NOISE_ALPHA_SHIFT") { settings_NOISE_ALPHA_SHIFT = v.toInt(); return true; }
+
   if (k == "MOTION_HOLD_MS") { settings_MOTION_HOLD_MS = (unsigned long)v.toInt(); return true; }
   if (k == "EVENTS_TO_TRIGGER") { settings_EVENTS_TO_TRIGGER = v.toInt(); return true; }
   if (k == "RCWL_MIN_ACTIVE_MS") { settings_RCWL_MIN_ACTIVE_MS = (unsigned long)v.toInt(); return true; }
+
   if (k == "ENABLE_RCWL_LEFT") {
-    String x = v; x.toLowerCase();
+    x = v; x.toLowerCase();
     settings_ENABLE_RCWL_LEFT = (x == "1" || x == "true" || x == "on" || x == "yes");
     return true;
   }
+
   if (k == "ENABLE_RCWL_RIGHT") {
-    String x = v; x.toLowerCase();
+    x = v; x.toLowerCase();
     settings_ENABLE_RCWL_RIGHT = (x == "1" || x == "true" || x == "on" || x == "yes");
     return true;
   }
@@ -576,7 +696,23 @@ static void handleApiSettingsSet() {
     return;
   }
 
-  sendCmdToArduino(key, val);
+  settings_MIN_AMPLITUDE_LEFT = clampInt(settings_MIN_AMPLITUDE_LEFT, 0, 1023);
+  settings_MIN_AMPLITUDE_RIGHT = clampInt(settings_MIN_AMPLITUDE_RIGHT, 0, 1023);
+
+  settings_NOISE_MULT_LEFT = clampInt(settings_NOISE_MULT_LEFT, 0, 300);
+  settings_NOISE_MULT_RIGHT = clampInt(settings_NOISE_MULT_RIGHT, 0, 300);
+
+  settings_NOISE_OFFSET_LEFT = clampInt(settings_NOISE_OFFSET_LEFT, -1023, 1023);
+  settings_NOISE_OFFSET_RIGHT = clampInt(settings_NOISE_OFFSET_RIGHT, -1023, 1023);
+
+  settings_NOISE_ALPHA_SHIFT = clampInt(settings_NOISE_ALPHA_SHIFT, 4, 12);
+
+  if (key == "MIN_AMPLITUDE") {
+    sendCmdToArduino("MIN_AMPLITUDE_LEFT", String(settings_MIN_AMPLITUDE_LEFT));
+    sendCmdToArduino("MIN_AMPLITUDE_RIGHT", String(settings_MIN_AMPLITUDE_RIGHT));
+  } else {
+    sendCmdToArduino(key, val);
+  }
 
   String body = "{\"ok\":true,\"ack\":\"";
   body += jsonEscape(lastAckLine);
@@ -592,39 +728,27 @@ static void handleApiSettingsSave() {
 
 static void setupHttp() {
   server.on("/", []() {
-    if (!serveFileFromSD("/webapp/index.html")) {
-      server.send(404, "text/plain", "missing /webapp/index.html");
-    }
+    if (!serveFileFromSD("/webapp/index.html")) server.send(404, "text/plain", "missing /webapp/index.html");
   });
 
   server.on("/assets/js/jquery.js", []() {
-    if (!serveFileFromSD("/webapp/assets/js/jquery.js")) {
-      server.send(404, "text/plain", "missing jquery.js");
-    }
+    if (!serveFileFromSD("/webapp/assets/js/jquery.js")) server.send(404, "text/plain", "missing jquery.js");
   });
 
   server.on("/assets/js/dygraph-min.js", []() {
-    if (!serveFileFromSD("/webapp/assets/js/dygraph-min.js")) {
-      server.send(404, "text/plain", "missing dygraph-min.js");
-    }
+    if (!serveFileFromSD("/webapp/assets/js/dygraph-min.js")) server.send(404, "text/plain", "missing dygraph-min.js");
   });
 
   server.on("/assets/js/dygraph-extra.js", []() {
-    if (!serveFileFromSD("/webapp/assets/js/dygraph-extra.js")) {
-      server.send(404, "text/plain", "missing dygraph-extra.js");
-    }
+    if (!serveFileFromSD("/webapp/assets/js/dygraph-extra.js")) server.send(404, "text/plain", "missing dygraph-extra.js");
   });
 
   server.on("/assets/js/app.js", []() {
-    if (!serveFileFromSD("/webapp/assets/js/app.js")) {
-      server.send(404, "text/plain", "missing app.js");
-    }
+    if (!serveFileFromSD("/webapp/assets/js/app.js")) server.send(404, "text/plain", "missing app.js");
   });
 
   server.on("/assets/css/style.css", []() {
-    if (!serveFileFromSD("/webapp/assets/css/style.css")) {
-      server.send(404, "text/plain", "missing style.css");
-    }
+    if (!serveFileFromSD("/webapp/assets/css/style.css")) server.send(404, "text/plain", "missing style.css");
   });
 
   server.on("/api/status", handleApiStatus);
@@ -642,27 +766,23 @@ static void setupHttp() {
   server.onNotFound([]() {
     String uri = server.uri();
     String sdPath = "/webapp" + uri;
-    if (!serveFileFromSD(sdPath)) {
-      server.send(404, "text/plain", "not found");
-    }
+    if (!serveFileFromSD(sdPath)) server.send(404, "text/plain", "not found");
   });
 
   server.begin();
 }
 
-static bool parseDataLine(const String &line, int &l, int &r, int &rl, int &rr) {
-  String s = trimLine(line);
+// New parser: accepts 4 or 6 ints. If only 4 are present, ledL/ledR default to 0.
+static bool parseCsv4or6(const String &sIn, int &l, int &r, int &rl, int &rr, int &ledL, int &ledR) {
+  String s = trimLine(sIn);
   if (s.length() == 0) return false;
-  if (!s.startsWith("D,")) return false;
 
-  int vals[4];
-  int idx = 0;
-  int start = 2;
+  int vals[6], idx = 0, start = 0;
 
-  for (int i = 2; i <= (int)s.length(); i++) {
+  for (int i = 0; i <= (int)s.length(); i++) {
     char ch = (i == (int)s.length()) ? ',' : s[i];
     if (ch == ',') {
-      if (idx >= 4) return false;
+      if (idx >= 6) return false;
       String part = s.substring(start, i);
       part.trim();
       vals[idx] = part.toInt();
@@ -671,13 +791,34 @@ static bool parseDataLine(const String &line, int &l, int &r, int &rl, int &rr) 
     }
   }
 
-  if (idx != 4) return false;
+  if (idx != 4 && idx != 6) return false;
 
   l = vals[0];
   r = vals[1];
   rl = vals[2];
   rr = vals[3];
+
+  if (idx == 6) {
+    ledL = vals[4];
+    ledR = vals[5];
+  } else {
+    ledL = 0;
+    ledR = 0;
+  }
+
   return true;
+}
+
+static bool parseDataLine(const String &line, int &l, int &r, int &rl, int &rr, int &ledL, int &ledR) {
+  String s = trimLine(line);
+  if (s.length() == 0) return false;
+
+  if (s.startsWith("D,")) {
+    String rest = trimLine(s.substring(2));
+    return parseCsv4or6(rest, l, r, rl, rr, ledL, ledR);
+  }
+
+  return parseCsv4or6(s, l, r, rl, rr, ledL, ledR);
 }
 
 static void handleUartLine(const String &line, unsigned long nowMs) {
@@ -690,20 +831,18 @@ static void handleUartLine(const String &line, unsigned long nowMs) {
   }
 
   if (loggingEnabled && sdOk) {
-    int l = 0, r = 0, rl = 0, rr = 0;
-    if (parseDataLine(s, l, r, rl, rr)) {
+    int l = 0, r = 0, rl = 0, rr = 0, ledL = 0, ledR = 0;
+    if (parseDataLine(s, l, r, rl, rr, ledL, ledR)) {
       unsigned long ts = nowMs - logStartMs;
 
       int n = snprintf(outbuf + outlen, OUTBUF_MAX - outlen,
-                       "%d, %d, %d, %d, %lu\n",
-                       l, r, rl, rr, (unsigned long)ts);
+                       "%d, %d, %d, %d, %d, %d, %lu\n",
+                       l, r, rl, rr, ledL, ledR, (unsigned long)ts);
 
       if (n > 0 && (outlen + n) < OUTBUF_MAX) {
         outlen += n;
         outLines++;
-        if (outLines >= BATCH_LINES) {
-          flushBatchToSD();
-        }
+        if (outLines >= BATCH_LINES) flushBatchToSD();
       } else {
         flushBatchToSD();
       }
@@ -726,8 +865,10 @@ void setup() {
     return;
   }
 
-  bool ok = readSettingsFromSD();
-  if (ok) {
+  ensureDir(LOG_DIR);
+  SD.mkdir("/settings");
+
+  if (readSettingsFromSD()) {
     pushAllSettingsToArduino();
   }
 
@@ -765,16 +906,14 @@ void loop() {
       }
       uartLine = "";
     } else {
-      if (uartLine.length() < 140) uartLine += c;
+      if (uartLine.length() < 160) uartLine += c;
     }
   }
 
   if (loggingEnabled && sdOk) {
     if (nowMs - flushLastMs >= 2000) {
       flushLastMs = nowMs;
-      if (outlen > 0) {
-        flushBatchToSD();
-      }
+      if (outlen > 0) flushBatchToSD();
     }
   }
 }

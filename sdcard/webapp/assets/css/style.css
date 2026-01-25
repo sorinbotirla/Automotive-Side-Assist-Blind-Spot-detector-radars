@@ -1,48 +1,304 @@
+:root {
+  --bg: #0b0f14;
+  --card: #101722;
+  --card2: #0f1620;
+  --text: #e8eef6;
+  --muted: #98a5b6;
+  --line: rgba(255,255,255,0.10);
+  --line2: rgba(255,255,255,0.14);
+
+  --ok-bg: rgba(0, 163, 255, 0.12);
+  --ok-bd: rgba(0, 163, 255, 0.35);
+
+  --err-bg: rgba(255, 64, 64, 0.14);
+  --err-bd: rgba(255, 64, 64, 0.35);
+
+  --btn-bg: rgba(255,255,255,0.06);
+  --btn-bg2: rgba(255,255,255,0.10);
+
+  --shadow: 0 12px 36px rgba(0,0,0,0.35);
+  --radius: 14px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+}
+
 body {
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, Helvetica, sans-serif;
   margin: 0;
   padding: 0;
+  background: radial-gradient(1200px 800px at 25% 0%, #14233a 0%, var(--bg) 55%) fixed;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 .wrap {
   padding: 16px;
+  max-width: 980px;
+  margin: 0 auto;
 }
 
-a {
-  display: inline-block;
-  margin: 6px 10px 6px 0;
-  text-decoration: underline;
-  cursor: pointer;
+h2, h3 {
+  margin: 0 0 12px 0;
+  letter-spacing: 0.2px;
+}
+
+h2 {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+h3 {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--muted);
 }
 
 .status {
-  margin: 10px 0;
-  padding: 10px;
-  background: #f2f2f2;
+  margin: 12px 0;
+  padding: 12px 12px;
+  border: 1px solid var(--line2);
+  background: rgba(255,255,255,0.05);
+  border-radius: 12px;
+  color: var(--text);
 }
 
-.logs a {
-  display: block;
-  margin: 4px 0;
+.status.ok {
+  background: var(--ok-bg);
+  border-color: var(--ok-bd);
+}
+
+.status.error {
+  background: var(--err-bg);
+  border-color: var(--err-bd);
+}
+
+#statusLine {
+  min-height: 18px;
+}
+
+a {
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+a:active {
+  opacity: 0.85;
+}
+
+.actions, .viewerNav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.actions a, .viewerNav a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 14px;
+  min-height: 44px;
+  border-radius: 999px;
+  border: 1px solid var(--line2);
+  background: var(--btn-bg);
+  box-shadow: 0 2px 0 rgba(255,255,255,0.04) inset;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.actions a:hover, .viewerNav a:hover {
+  background: var(--btn-bg2);
+}
+
+.actions a:focus, .viewerNav a:focus {
+  outline: 2px solid rgba(0,163,255,0.55);
+  outline-offset: 2px;
 }
 
 .viewerTop {
-  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0;
 }
 
-canvas {
+.viewerTop #statusLine {
+  margin: 0;
+  flex: 1;
+  text-align: right;
+  border-radius: 999px;
+  padding: 10px 12px;
+  border: 1px solid var(--line2);
+  background: rgba(255,255,255,0.04);
+}
+
+.viewerTop a#backHome {
+  padding: 12px 14px;
+  min-height: 44px;
+  border-radius: 999px;
+  border: 1px solid var(--line2);
+  background: var(--btn-bg);
+  font-weight: 600;
+}
+
+.meta {
+  display: inline-block;
+  padding: 10px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line2);
+  background: rgba(255,255,255,0.04);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.logs {
+  margin-top: 10px;
+}
+
+.logRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.035);
+  border-radius: 12px;
+  margin: 8px 0;
+}
+
+.logOpen {
+  flex: 1;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  font-weight: 600;
+}
+
+.logDel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,64,64,0.35);
+  background: rgba(255,64,64,0.10);
+  color: #ffd0d0;
+  font-weight: 700;
+}
+
+.gtitle {
+  margin: 14px 0 8px 0;
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.2px;
+}
+
+.dyg {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255,255,255,0.03);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* Settings */
+.settingsGrid {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.03);
+  border-radius: var(--radius);
+  padding: 12px;
+  box-shadow: var(--shadow);
+}
+
+.settingsGrid .row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.settingsGrid .row:last-child {
+  border-bottom: none;
+}
+
+.settingsGrid .label {
+  width: 220px;
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.2px;
+}
+
+.settingsGrid .field {
+  flex: 1;
+}
+
+.settingsGrid input,
+.settingsGrid select {
   width: 100%;
-  height: 220px;
-  border: 1px solid #ccc;
-  display: block;
-  margin: 10px 0;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line2);
+  background: rgba(0,0,0,0.20);
+  color: var(--text);
+  font-size: 16px;
 }
 
-.settingsGrid { margin-top: 12px; }
-.settingsGrid .row { display:flex; align-items:center; margin:10px 0; }
-.settingsGrid .label { width:220px; }
-.settingsGrid .field { flex:1; }
-.settingsGrid input, .settingsGrid select { width:100%; padding:6px; box-sizing:border-box; }
-.status.ok { background:#f2f2f2; padding:10px; margin:10px 0; }
-.status.error { background:#ffd6d6; padding:10px; margin:10px 0; }
-.meta { margin-left:10px; }
+.settingsGrid input:focus,
+.settingsGrid select:focus {
+  outline: 2px solid rgba(0,163,255,0.55);
+  outline-offset: 2px;
+}
+
+#ackLine {
+  margin-top: 12px;
+}
+
+/* Mobile adjustments */
+@media (max-width: 640px) {
+  .wrap {
+    padding: 12px;
+  }
+
+  .viewerTop {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .viewerTop #statusLine {
+    text-align: left;
+  }
+
+  .settingsGrid .row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .settingsGrid .label {
+    width: auto;
+  }
+
+  .actions a, .viewerNav a, .viewerTop a#backHome {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .meta {
+    width: 100%;
+    text-align: center;
+  }
+}
