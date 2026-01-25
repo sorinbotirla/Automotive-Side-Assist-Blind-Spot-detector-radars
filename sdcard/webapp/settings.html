@@ -1,0 +1,69 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Radar Settings</title>
+    <link rel="stylesheet" href="/assets/css/style.css">
+</head>
+<body>
+<div class="wrap" id="settingsPage">
+    <h2>Radar Settings</h2>
+
+    <div class="actions">
+        <a href="/" id="backHome">Back</a>
+        <a href="#" id="reloadSettings">Reload from SD and apply</a>
+        <a href="#" id="saveSettings">Save to SD</a>
+    </div>
+
+    <div id="statusLine"></div>
+
+    <div class="settingsGrid">
+        <div class="row">
+            <div class="label">MIN_AMPLITUDE</div>
+            <div class="field"><input type="number" id="MIN_AMPLITUDE" /></div>
+        </div>
+
+        <div class="row">
+            <div class="label">MOTION_HOLD_MS</div>
+            <div class="field"><input type="number" id="MOTION_HOLD_MS" /></div>
+        </div>
+
+        <div class="row">
+            <div class="label">EVENTS_TO_TRIGGER</div>
+            <div class="field"><input type="number" id="EVENTS_TO_TRIGGER" /></div>
+        </div>
+
+        <div class="row">
+            <div class="label">RCWL_MIN_ACTIVE_MS</div>
+            <div class="field"><input type="number" id="RCWL_MIN_ACTIVE_MS" /></div>
+        </div>
+
+        <div class="row">
+            <div class="label">ENABLE_RCWL_LEFT</div>
+            <div class="field">
+                <select id="ENABLE_RCWL_LEFT">
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="label">ENABLE_RCWL_RIGHT</div>
+            <div class="field">
+                <select id="ENABLE_RCWL_RIGHT">
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <div class="status" id="ackLine">ACK: none</div>
+</div>
+
+<script src="/assets/js/jquery.js"></script>
+<script src="/assets/js/app.js"></script>
+</body>
+</html>

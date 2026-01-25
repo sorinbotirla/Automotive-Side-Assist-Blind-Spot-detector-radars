@@ -1,17 +1,17 @@
 // Dual HB100 + RCWL blind spot detector
 
 const unsigned long SAMPLE_PERIOD_US = 200;   // 5 kHz
-const int MIN_AMPLITUDE = 70; // ADC counts
+const int MIN_AMPLITUDE = 80; // ADC counts
 
 const unsigned long MIN_PERIOD_US = 1000;
 const unsigned long MAX_PERIOD_US = 500000;
 
-const unsigned long MOTION_HOLD_MS = 800;
+const unsigned long MOTION_HOLD_MS = 500;
 
-const int EVENTS_TO_TRIGGER = 2;
+const int EVENTS_TO_TRIGGER = 1;
 const unsigned long EVENT_WINDOW_MS = 500;
 
-const unsigned long RCWL_MIN_ACTIVE_MS = 2000;
+const unsigned long RCWL_MIN_ACTIVE_MS = 1000;
 
 // Pins
 const int HB100_LEFT_PIN = A0;
@@ -28,6 +28,7 @@ bool ENABLE_RCWL_RIGHT = true;
 
 // Timing
 unsigned long lastSample = 0;
+unsigned long lastTelemetryMs = 0;
 
 // LEFT
 long baselineLeft = 512;
@@ -48,6 +49,8 @@ unsigned long windowRight = 0;
 unsigned long rcwlRightStart = 0;
 
 void setup() {
+  Serial.begin(115200);
+
   analogReference(DEFAULT);
 
   pinMode(HB100_LEFT_PIN, INPUT);
@@ -178,4 +181,23 @@ void loop() {
   // RCWL ALWAYS override
   digitalWrite(LED_LEFT_PIN,  (hb100DetectedMotionLeft  && !rcwlIsOverrideLeft)  ? LOW : HIGH);
   digitalWrite(LED_RIGHT_PIN, (hb100DetectedMotionRight && !rcwlIsOverrideRight) ? LOW : HIGH);
+
+  // Telemetry to ESP32 every 100ms: leftVal, rightVal, rcwlLeftRaw, rcwlRightRaw
+  if (nowMs - lastTelemetryMs >= 100) {
+    lastTelemetryMs = nowMs;
+
+    int valLeft = rawLeft - (int)baselineLeft;
+    int valRight = rawRight - (int)baselineRight;
+
+    int rcwlLeftRaw = (digitalRead(RCWL_LEFT_PIN) == HIGH) ? 1 : 0;
+    int rcwlRightRaw = (digitalRead(RCWL_RIGHT_PIN) == HIGH) ? 1 : 0;
+
+    Serial.print(valLeft);
+    Serial.print(", ");
+    Serial.print(valRight);
+    Serial.print(", ");
+    Serial.print(rcwlLeftRaw);
+    Serial.print(", ");
+    Serial.println(rcwlRightRaw);
+  }
 }
