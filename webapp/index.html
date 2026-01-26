@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Radar Logger</title>
+  <link rel="stylesheet" href="/assets/css/style.css">
+
+</head>
+<body>
+  <div class="wrap">
+    <h2>Radar Logger</h2>
+    <div id="statusLine"></div>
+    <div id="status" class="status">Loading...</div>
+
+    <div class="actions">
+      <a href="#" id="startLog">Start logging</a>
+      <a href="#" id="stopLog">Stop logging</a>
+      <a href="#" id="refreshLogs">Refresh logs</a>
+      <a href="/settings.html" id="openSettings">Settings</a>
+    </div>
+
+    <h3>Logs</h3>
+    <div id="logs" class="logs">Loading...</div>
+  </div>
+  <script src="/assets/js/jquery.js"></script>
+  <script src="/assets/js/dygraph-min.js"></script>
+  <script src="/assets/js/dygraph-extra.js"></script>
+  <script src="/assets/js/app.js"></script>
+</body>
+</html>

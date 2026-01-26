@@ -27,7 +27,7 @@ static unsigned long logStartMs = 0;
 static unsigned long flushLastMs = 0;
 
 static const int BATCH_LINES = 100;
-static const int LINE_BYTES = 80;
+static const int LINE_BYTES = 110; // enough for 8 ints + timestamp
 static const int OUTBUF_MAX = BATCH_LINES * LINE_BYTES;
 
 static char outbuf[OUTBUF_MAX];
@@ -42,29 +42,97 @@ static String wifiPass = "";
 static const char *SETTINGS_PATH = "/settings/radarsettings.json";
 static const char *LOG_DIR = "/logs";
 
-// Backward compatible settings for old UI
-static int settings_MIN_AMPLITUDE = 80;
+/*
+  SETTINGS 
+  NOTE: keeping some legacy keys for backward compatibility:
+   - MIN_AMPLITUDE (maps to LEFT/RIGHT)
+   - MOTION_HOLD_MS (maps to MOTION_HOLD_MILISECONDS)
+   - RCWL_MIN_ACTIVE_MS (maps to RCWL_MIN_ACTIVE_MILISECONDS)
+   - NOISE_ALPHA_SHIFT (maps to NOISE_AVERAGE_UPDATE_SPEED)
+*/
 
-// Option 3 adaptive settings
-static int settings_MIN_AMPLITUDE_LEFT = 80;
-static int settings_MIN_AMPLITUDE_RIGHT = 80;
+// Legacy (old UI)
+static int settings_MIN_AMPLITUDE = 60;
 
-static int settings_NOISE_MULT_LEFT = 40;
-static int settings_NOISE_MULT_RIGHT = 40;
+// Timing / periods (new)
+static unsigned long settings_SAMPLE_PERIOD_MICROSECONDS = 200;
+static unsigned long settings_MIN_PERIOD_MICROSECONDS = 1000;
+static unsigned long settings_MAX_PERIOD_MICROSECONDS = 500000;
+
+// Motion hold
+static unsigned long settings_MOTION_HOLD_MILISECONDS = 500;
+
+// Event counting
+static int settings_EVENTS_TO_TRIGGER = 1;
+
+// RCWL override
+static unsigned long settings_RCWL_MIN_ACTIVE_MILISECONDS = 1000;
+static bool settings_ENABLE_RCWL_LEFT = true;
+static bool settings_ENABLE_RCWL_RIGHT = true;
+
+// Adaptive threshold (per side)
+static int settings_MIN_AMPLITUDE_LEFT = 60;
+static int settings_MIN_AMPLITUDE_RIGHT = 60;
+
+static int settings_NOISE_MULT_LEFT = 0; // x10 units
+static int settings_NOISE_MULT_RIGHT = 0;
 
 static int settings_NOISE_OFFSET_LEFT = 0;
 static int settings_NOISE_OFFSET_RIGHT = 0;
 
-static int settings_NOISE_ALPHA_SHIFT = 7;
-
-// Other existing settings
-static unsigned long settings_MOTION_HOLD_MS = 500;
-static int settings_EVENTS_TO_TRIGGER = 1;
-static unsigned long settings_RCWL_MIN_ACTIVE_MS = 1000;
-static bool settings_ENABLE_RCWL_LEFT = true;
-static bool settings_ENABLE_RCWL_RIGHT = true;
+static int settings_NOISE_AVERAGE_UPDATE_SPEED = 7;
 
 static String lastAckLine = "";
+
+// Live HB100 averages (about 1s)
+static long liveSumL = 0;
+static long liveSumR = 0;
+static long liveSumAbsL = 0;
+static long liveSumAbsR = 0;
+static unsigned long liveCnt = 0;
+
+static unsigned long liveWindowStartMs = 0;
+static int liveAvgL = 0;
+static int liveAvgR = 0;
+static int liveAbsAvgL = 0;
+static int liveAbsAvgR = 0;
+
+static int liveLastL = 0;
+static int liveLastR = 0;
+static unsigned long liveLastSampleMs = 0;
+
+static int iabs(int v) { return (v < 0) ? -v : v; }
+
+static void liveFeedSample(int l, int r, unsigned long nowMs) {
+  liveLastL = l;
+  liveLastR = r;
+  liveLastSampleMs = nowMs;
+
+  if (liveWindowStartMs == 0) liveWindowStartMs = nowMs;
+
+  liveSumL += l;
+  liveSumR += r;
+  liveSumAbsL += iabs(l);
+  liveSumAbsR += iabs(r);
+  liveCnt++;
+
+  if (nowMs - liveWindowStartMs >= 1000) {
+    if (liveCnt > 0) {
+      liveAvgL = (int)(liveSumL / (long)liveCnt);
+      liveAvgR = (int)(liveSumR / (long)liveCnt);
+      liveAbsAvgL = (int)(liveSumAbsL / (long)liveCnt);
+      liveAbsAvgR = (int)(liveSumAbsR / (long)liveCnt);
+    }
+
+    liveSumL = 0;
+    liveSumR = 0;
+    liveSumAbsL = 0;
+    liveSumAbsR = 0;
+    liveCnt = 0;
+    liveWindowStartMs = nowMs;
+  }
+}
+
 
 static String trimLine(String s) {
   s.replace("\r", "");
@@ -81,6 +149,18 @@ static bool ensureDir(const char *path) {
   if (!sdOk) return false;
   if (SD.exists(path)) return true;
   return SD.mkdir(path);
+}
+
+static int clampInt(int v, int lo, int hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
+}
+
+static unsigned long clampULong(long v, unsigned long lo, unsigned long hi) {
+  if (v < (long)lo) return lo;
+  if (v > (long)hi) return hi;
+  return (unsigned long)v;
 }
 
 static bool readWifiCredentialsFromSD() {
@@ -231,7 +311,6 @@ static void startLogging() {
   }
 
   ensureDir(LOG_DIR);
-
   flushBatchToSD();
 
   int idx = findNextLogIndex();
@@ -273,10 +352,29 @@ static String jsonEscape(const String &s) {
 }
 
 static String settingsToJson() {
+  // keep legacy MIN_AMPLITUDE in sync (mirror LEFT)
   settings_MIN_AMPLITUDE = settings_MIN_AMPLITUDE_LEFT;
 
   String body = "{";
+
+  // Legacy keys (still output for backward compatibility)
   body += "\"MIN_AMPLITUDE\":"; body += String(settings_MIN_AMPLITUDE); body += ",";
+  body += "\"MOTION_HOLD_MS\":"; body += String(settings_MOTION_HOLD_MILISECONDS); body += ",";
+  body += "\"RCWL_MIN_ACTIVE_MS\":"; body += String(settings_RCWL_MIN_ACTIVE_MILISECONDS); body += ",";
+  body += "\"NOISE_ALPHA_SHIFT\":"; body += String(settings_NOISE_AVERAGE_UPDATE_SPEED); body += ",";
+
+  // New timing keys
+  body += "\"SAMPLE_PERIOD_MICROSECONDS\":"; body += String(settings_SAMPLE_PERIOD_MICROSECONDS); body += ",";
+  body += "\"MIN_PERIOD_MICROSECONDS\":"; body += String(settings_MIN_PERIOD_MICROSECONDS); body += ",";
+  body += "\"MAX_PERIOD_MICROSECONDS\":"; body += String(settings_MAX_PERIOD_MICROSECONDS); body += ",";
+
+  // New canonical keys
+  body += "\"MOTION_HOLD_MILISECONDS\":"; body += String(settings_MOTION_HOLD_MILISECONDS); body += ",";
+  body += "\"EVENTS_TO_TRIGGER\":"; body += String(settings_EVENTS_TO_TRIGGER); body += ",";
+  body += "\"RCWL_MIN_ACTIVE_MILISECONDS\":"; body += String(settings_RCWL_MIN_ACTIVE_MILISECONDS); body += ",";
+
+  body += "\"ENABLE_RCWL_LEFT\":"; body += (settings_ENABLE_RCWL_LEFT ? "true" : "false"); body += ",";
+  body += "\"ENABLE_RCWL_RIGHT\":"; body += (settings_ENABLE_RCWL_RIGHT ? "true" : "false"); body += ",";
 
   body += "\"MIN_AMPLITUDE_LEFT\":"; body += String(settings_MIN_AMPLITUDE_LEFT); body += ",";
   body += "\"MIN_AMPLITUDE_RIGHT\":"; body += String(settings_MIN_AMPLITUDE_RIGHT); body += ",";
@@ -287,13 +385,8 @@ static String settingsToJson() {
   body += "\"NOISE_OFFSET_LEFT\":"; body += String(settings_NOISE_OFFSET_LEFT); body += ",";
   body += "\"NOISE_OFFSET_RIGHT\":"; body += String(settings_NOISE_OFFSET_RIGHT); body += ",";
 
-  body += "\"NOISE_ALPHA_SHIFT\":"; body += String(settings_NOISE_ALPHA_SHIFT); body += ",";
+  body += "\"NOISE_AVERAGE_UPDATE_SPEED\":"; body += String(settings_NOISE_AVERAGE_UPDATE_SPEED);
 
-  body += "\"MOTION_HOLD_MS\":"; body += String(settings_MOTION_HOLD_MS); body += ",";
-  body += "\"EVENTS_TO_TRIGGER\":"; body += String(settings_EVENTS_TO_TRIGGER); body += ",";
-  body += "\"RCWL_MIN_ACTIVE_MS\":"; body += String(settings_RCWL_MIN_ACTIVE_MS); body += ",";
-  body += "\"ENABLE_RCWL_LEFT\":"; body += (settings_ENABLE_RCWL_LEFT ? "true" : "false"); body += ",";
-  body += "\"ENABLE_RCWL_RIGHT\":"; body += (settings_ENABLE_RCWL_RIGHT ? "true" : "false");
   body += "}";
   return body;
 }
@@ -357,10 +450,38 @@ static bool jsonReadBool(const String &json, const char *key, bool &outVal) {
   return false;
 }
 
-static int clampInt(int v, int lo, int hi) {
-  if (v < lo) return lo;
-  if (v > hi) return hi;
-  return v;
+static void clampTimingSane() {
+  // same bounds as Arduino-side clamps (keep values clean)
+  settings_SAMPLE_PERIOD_MICROSECONDS = clampULong((long)settings_SAMPLE_PERIOD_MICROSECONDS, 50, 5000);
+
+  settings_MIN_PERIOD_MICROSECONDS = clampULong((long)settings_MIN_PERIOD_MICROSECONDS, 100, 2000000UL);
+  settings_MAX_PERIOD_MICROSECONDS = clampULong((long)settings_MAX_PERIOD_MICROSECONDS, 200, 2000000UL);
+
+  if (settings_MIN_PERIOD_MICROSECONDS >= settings_MAX_PERIOD_MICROSECONDS) {
+    if (settings_MAX_PERIOD_MICROSECONDS > 101) settings_MIN_PERIOD_MICROSECONDS = settings_MAX_PERIOD_MICROSECONDS - 1;
+    else settings_MIN_PERIOD_MICROSECONDS = 100;
+    if (settings_MAX_PERIOD_MICROSECONDS <= settings_MIN_PERIOD_MICROSECONDS) settings_MAX_PERIOD_MICROSECONDS = settings_MIN_PERIOD_MICROSECONDS + 1;
+  }
+
+  settings_MOTION_HOLD_MILISECONDS = clampULong((long)settings_MOTION_HOLD_MILISECONDS, 0, 60000UL);
+  settings_RCWL_MIN_ACTIVE_MILISECONDS = clampULong((long)settings_RCWL_MIN_ACTIVE_MILISECONDS, 0, 60000UL);
+}
+
+static void clampAdaptiveSane() {
+  settings_MIN_AMPLITUDE_LEFT = clampInt(settings_MIN_AMPLITUDE_LEFT, 0, 1023);
+  settings_MIN_AMPLITUDE_RIGHT = clampInt(settings_MIN_AMPLITUDE_RIGHT, 0, 1023);
+
+  settings_NOISE_MULT_LEFT = clampInt(settings_NOISE_MULT_LEFT, 0, 300);
+  settings_NOISE_MULT_RIGHT = clampInt(settings_NOISE_MULT_RIGHT, 0, 300);
+
+  settings_NOISE_OFFSET_LEFT = clampInt(settings_NOISE_OFFSET_LEFT, -1023, 1023);
+  settings_NOISE_OFFSET_RIGHT = clampInt(settings_NOISE_OFFSET_RIGHT, -1023, 1023);
+
+  settings_NOISE_AVERAGE_UPDATE_SPEED = clampInt(settings_NOISE_AVERAGE_UPDATE_SPEED, 4, 12);
+
+  settings_EVENTS_TO_TRIGGER = clampInt(settings_EVENTS_TO_TRIGGER, 1, 20);
+
+  settings_MIN_AMPLITUDE = settings_MIN_AMPLITUDE_LEFT;
 }
 
 static bool readSettingsFromSD() {
@@ -385,12 +506,39 @@ static bool readSettingsFromSD() {
   long li = 0;
   bool lb = false;
 
+  // Legacy MIN_AMPLITUDE -> both sides
   if (jsonReadInt(json, "MIN_AMPLITUDE", li)) {
     settings_MIN_AMPLITUDE = (int)li;
     settings_MIN_AMPLITUDE_LEFT = settings_MIN_AMPLITUDE;
     settings_MIN_AMPLITUDE_RIGHT = settings_MIN_AMPLITUDE;
   }
 
+  // Timing (new keys)
+  if (jsonReadInt(json, "SAMPLE_PERIOD_MICROSECONDS", li)) settings_SAMPLE_PERIOD_MICROSECONDS = (unsigned long)li;
+  if (jsonReadInt(json, "MIN_PERIOD_MICROSECONDS", li)) settings_MIN_PERIOD_MICROSECONDS = (unsigned long)li;
+  if (jsonReadInt(json, "MAX_PERIOD_MICROSECONDS", li)) settings_MAX_PERIOD_MICROSECONDS = (unsigned long)li;
+
+  // Timing legacy aliases (in case older files exist)
+  if (jsonReadInt(json, "SAMPLE_PERIOD_US", li)) settings_SAMPLE_PERIOD_MICROSECONDS = (unsigned long)li;
+  if (jsonReadInt(json, "MIN_PERIOD_US", li)) settings_MIN_PERIOD_MICROSECONDS = (unsigned long)li;
+  if (jsonReadInt(json, "MAX_PERIOD_US", li)) settings_MAX_PERIOD_MICROSECONDS = (unsigned long)li;
+
+  // Motion hold (new + legacy)
+  if (jsonReadInt(json, "MOTION_HOLD_MILISECONDS", li)) settings_MOTION_HOLD_MILISECONDS = (unsigned long)li;
+  if (jsonReadInt(json, "MOTION_HOLD_MS", li)) settings_MOTION_HOLD_MILISECONDS = (unsigned long)li;
+
+  // RCWL (new + legacy)
+  if (jsonReadInt(json, "RCWL_MIN_ACTIVE_MILISECONDS", li)) settings_RCWL_MIN_ACTIVE_MILISECONDS = (unsigned long)li;
+  if (jsonReadInt(json, "RCWL_MIN_ACTIVE_MS", li)) settings_RCWL_MIN_ACTIVE_MILISECONDS = (unsigned long)li;
+
+  // Event count
+  if (jsonReadInt(json, "EVENTS_TO_TRIGGER", li)) settings_EVENTS_TO_TRIGGER = (int)li;
+
+  // Enable flags
+  if (jsonReadBool(json, "ENABLE_RCWL_LEFT", lb)) settings_ENABLE_RCWL_LEFT = lb;
+  if (jsonReadBool(json, "ENABLE_RCWL_RIGHT", lb)) settings_ENABLE_RCWL_RIGHT = lb;
+
+  // Per-side adaptive
   if (jsonReadInt(json, "MIN_AMPLITUDE_LEFT", li)) settings_MIN_AMPLITUDE_LEFT = (int)li;
   if (jsonReadInt(json, "MIN_AMPLITUDE_RIGHT", li)) settings_MIN_AMPLITUDE_RIGHT = (int)li;
 
@@ -400,26 +548,12 @@ static bool readSettingsFromSD() {
   if (jsonReadInt(json, "NOISE_OFFSET_LEFT", li)) settings_NOISE_OFFSET_LEFT = (int)li;
   if (jsonReadInt(json, "NOISE_OFFSET_RIGHT", li)) settings_NOISE_OFFSET_RIGHT = (int)li;
 
-  if (jsonReadInt(json, "NOISE_ALPHA_SHIFT", li)) settings_NOISE_ALPHA_SHIFT = (int)li;
+  // Renamed noise update speed (new + legacy)
+  if (jsonReadInt(json, "NOISE_AVERAGE_UPDATE_SPEED", li)) settings_NOISE_AVERAGE_UPDATE_SPEED = (int)li;
+  if (jsonReadInt(json, "NOISE_ALPHA_SHIFT", li)) settings_NOISE_AVERAGE_UPDATE_SPEED = (int)li;
 
-  if (jsonReadInt(json, "MOTION_HOLD_MS", li)) settings_MOTION_HOLD_MS = (unsigned long)li;
-  if (jsonReadInt(json, "EVENTS_TO_TRIGGER", li)) settings_EVENTS_TO_TRIGGER = (int)li;
-  if (jsonReadInt(json, "RCWL_MIN_ACTIVE_MS", li)) settings_RCWL_MIN_ACTIVE_MS = (unsigned long)li;
-  if (jsonReadBool(json, "ENABLE_RCWL_LEFT", lb)) settings_ENABLE_RCWL_LEFT = lb;
-  if (jsonReadBool(json, "ENABLE_RCWL_RIGHT", lb)) settings_ENABLE_RCWL_RIGHT = lb;
-
-  settings_MIN_AMPLITUDE_LEFT = clampInt(settings_MIN_AMPLITUDE_LEFT, 0, 1023);
-  settings_MIN_AMPLITUDE_RIGHT = clampInt(settings_MIN_AMPLITUDE_RIGHT, 0, 1023);
-
-  settings_NOISE_MULT_LEFT = clampInt(settings_NOISE_MULT_LEFT, 0, 300);
-  settings_NOISE_MULT_RIGHT = clampInt(settings_NOISE_MULT_RIGHT, 0, 300);
-
-  settings_NOISE_OFFSET_LEFT = clampInt(settings_NOISE_OFFSET_LEFT, -1023, 1023);
-  settings_NOISE_OFFSET_RIGHT = clampInt(settings_NOISE_OFFSET_RIGHT, -1023, 1023);
-
-  settings_NOISE_ALPHA_SHIFT = clampInt(settings_NOISE_ALPHA_SHIFT, 4, 12);
-
-  settings_MIN_AMPLITUDE = settings_MIN_AMPLITUDE_LEFT;
+  clampTimingSane();
+  clampAdaptiveSane();
 
   return true;
 }
@@ -446,6 +580,22 @@ static void sendCmdToArduino(const String &key, const String &val) {
 }
 
 static void pushAllSettingsToArduino() {
+  // Timing first
+  sendCmdToArduino("SAMPLE_PERIOD_MICROSECONDS", String(settings_SAMPLE_PERIOD_MICROSECONDS));
+  sendCmdToArduino("MIN_PERIOD_MICROSECONDS", String(settings_MIN_PERIOD_MICROSECONDS));
+  sendCmdToArduino("MAX_PERIOD_MICROSECONDS", String(settings_MAX_PERIOD_MICROSECONDS));
+
+  sendCmdToArduino("MOTION_HOLD_MILISECONDS", String(settings_MOTION_HOLD_MILISECONDS));
+
+  // Events
+  sendCmdToArduino("EVENTS_TO_TRIGGER", String(settings_EVENTS_TO_TRIGGER));
+
+  // RCWL
+  sendCmdToArduino("RCWL_MIN_ACTIVE_MILISECONDS", String(settings_RCWL_MIN_ACTIVE_MILISECONDS));
+  sendCmdToArduino("ENABLE_RCWL_LEFT", settings_ENABLE_RCWL_LEFT ? "1" : "0");
+  sendCmdToArduino("ENABLE_RCWL_RIGHT", settings_ENABLE_RCWL_RIGHT ? "1" : "0");
+
+  // Adaptive threshold
   sendCmdToArduino("MIN_AMPLITUDE_LEFT", String(settings_MIN_AMPLITUDE_LEFT));
   sendCmdToArduino("MIN_AMPLITUDE_RIGHT", String(settings_MIN_AMPLITUDE_RIGHT));
 
@@ -455,13 +605,25 @@ static void pushAllSettingsToArduino() {
   sendCmdToArduino("NOISE_OFFSET_LEFT", String(settings_NOISE_OFFSET_LEFT));
   sendCmdToArduino("NOISE_OFFSET_RIGHT", String(settings_NOISE_OFFSET_RIGHT));
 
-  sendCmdToArduino("NOISE_ALPHA_SHIFT", String(settings_NOISE_ALPHA_SHIFT));
+  sendCmdToArduino("NOISE_AVERAGE_UPDATE_SPEED", String(settings_NOISE_AVERAGE_UPDATE_SPEED));
+}
 
-  sendCmdToArduino("MOTION_HOLD_MS", String(settings_MOTION_HOLD_MS));
-  sendCmdToArduino("EVENTS_TO_TRIGGER", String(settings_EVENTS_TO_TRIGGER));
-  sendCmdToArduino("RCWL_MIN_ACTIVE_MS", String(settings_RCWL_MIN_ACTIVE_MS));
-  sendCmdToArduino("ENABLE_RCWL_LEFT", settings_ENABLE_RCWL_LEFT ? "1" : "0");
-  sendCmdToArduino("ENABLE_RCWL_RIGHT", settings_ENABLE_RCWL_RIGHT ? "1" : "0");
+static void handleApiLive() {
+  unsigned long nowMs = millis();
+  unsigned long age = (liveLastSampleMs == 0) ? 0 : (nowMs - liveLastSampleMs);
+
+  String body = "{";
+  body += "\"ok\":true,";
+  body += "\"hb_left_avg\":"; body += String(liveAvgL); body += ",";
+  body += "\"hb_right_avg\":"; body += String(liveAvgR); body += ",";
+  body += "\"hb_left_absavg\":"; body += String(liveAbsAvgL); body += ",";
+  body += "\"hb_right_absavg\":"; body += String(liveAbsAvgR); body += ",";
+  body += "\"hb_left_last\":"; body += String(liveLastL); body += ",";
+  body += "\"hb_right_last\":"; body += String(liveLastR); body += ",";
+  body += "\"age_ms\":"; body += String(age);
+  body += "}";
+
+  server.send(200, "application/json", body);
 }
 
 static void handleApiStatus() {
@@ -644,6 +806,7 @@ static bool applySettingKeyValue(const String &key, const String &val) {
   k.trim();
   v.trim();
 
+  // Legacy MIN_AMPLITUDE -> both sides
   if (k == "MIN_AMPLITUDE") {
     li = v.toInt();
     settings_MIN_AMPLITUDE = (int)li;
@@ -652,20 +815,34 @@ static bool applySettingKeyValue(const String &key, const String &val) {
     return true;
   }
 
-  if (k == "MIN_AMPLITUDE_LEFT") { settings_MIN_AMPLITUDE_LEFT = v.toInt(); settings_MIN_AMPLITUDE = settings_MIN_AMPLITUDE_LEFT; return true; }
-  if (k == "MIN_AMPLITUDE_RIGHT") { settings_MIN_AMPLITUDE_RIGHT = v.toInt(); return true; }
+  // Timing / periods (new + aliases)
+  if (k == "SAMPLE_PERIOD_MICROSECONDS" || k == "SAMPLE_PERIOD_US") {
+    settings_SAMPLE_PERIOD_MICROSECONDS = (unsigned long)v.toInt();
+    return true;
+  }
+  if (k == "MIN_PERIOD_MICROSECONDS" || k == "MIN_PERIOD_US") {
+    settings_MIN_PERIOD_MICROSECONDS = (unsigned long)v.toInt();
+    return true;
+  }
+  if (k == "MAX_PERIOD_MICROSECONDS" || k == "MAX_PERIOD_US") {
+    settings_MAX_PERIOD_MICROSECONDS = (unsigned long)v.toInt();
+    return true;
+  }
 
-  if (k == "NOISE_MULT_LEFT") { settings_NOISE_MULT_LEFT = v.toInt(); return true; }
-  if (k == "NOISE_MULT_RIGHT") { settings_NOISE_MULT_RIGHT = v.toInt(); return true; }
+  // Motion hold (new + legacy)
+  if (k == "MOTION_HOLD_MILISECONDS" || k == "MOTION_HOLD_MS") {
+    settings_MOTION_HOLD_MILISECONDS = (unsigned long)v.toInt();
+    return true;
+  }
 
-  if (k == "NOISE_OFFSET_LEFT") { settings_NOISE_OFFSET_LEFT = v.toInt(); return true; }
-  if (k == "NOISE_OFFSET_RIGHT") { settings_NOISE_OFFSET_RIGHT = v.toInt(); return true; }
-
-  if (k == "NOISE_ALPHA_SHIFT") { settings_NOISE_ALPHA_SHIFT = v.toInt(); return true; }
-
-  if (k == "MOTION_HOLD_MS") { settings_MOTION_HOLD_MS = (unsigned long)v.toInt(); return true; }
+  // Events
   if (k == "EVENTS_TO_TRIGGER") { settings_EVENTS_TO_TRIGGER = v.toInt(); return true; }
-  if (k == "RCWL_MIN_ACTIVE_MS") { settings_RCWL_MIN_ACTIVE_MS = (unsigned long)v.toInt(); return true; }
+
+  // RCWL min active (new + legacy)
+  if (k == "RCWL_MIN_ACTIVE_MILISECONDS" || k == "RCWL_MIN_ACTIVE_MS") {
+    settings_RCWL_MIN_ACTIVE_MILISECONDS = (unsigned long)v.toInt();
+    return true;
+  }
 
   if (k == "ENABLE_RCWL_LEFT") {
     x = v; x.toLowerCase();
@@ -679,7 +856,54 @@ static bool applySettingKeyValue(const String &key, const String &val) {
     return true;
   }
 
+  // Adaptive threshold
+  if (k == "MIN_AMPLITUDE_LEFT") { settings_MIN_AMPLITUDE_LEFT = v.toInt(); settings_MIN_AMPLITUDE = settings_MIN_AMPLITUDE_LEFT; return true; }
+  if (k == "MIN_AMPLITUDE_RIGHT") { settings_MIN_AMPLITUDE_RIGHT = v.toInt(); return true; }
+
+  if (k == "NOISE_MULT_LEFT") { settings_NOISE_MULT_LEFT = v.toInt(); return true; }
+  if (k == "NOISE_MULT_RIGHT") { settings_NOISE_MULT_RIGHT = v.toInt(); return true; }
+
+  if (k == "NOISE_OFFSET_LEFT") { settings_NOISE_OFFSET_LEFT = v.toInt(); return true; }
+  if (k == "NOISE_OFFSET_RIGHT") { settings_NOISE_OFFSET_RIGHT = v.toInt(); return true; }
+
+  // Renamed (new + legacy)
+  if (k == "NOISE_AVERAGE_UPDATE_SPEED" || k == "NOISE_ALPHA_SHIFT") {
+    settings_NOISE_AVERAGE_UPDATE_SPEED = v.toInt();
+    return true;
+  }
+
   return false;
+}
+
+static void sendCanonicalSettingToArduino(const String &key, const String &val) {
+  // Map aliases to canonical Arduino keys
+  if (key == "MOTION_HOLD_MS") {
+    sendCmdToArduino("MOTION_HOLD_MILISECONDS", String(settings_MOTION_HOLD_MILISECONDS));
+    return;
+  }
+  if (key == "RCWL_MIN_ACTIVE_MS") {
+    sendCmdToArduino("RCWL_MIN_ACTIVE_MILISECONDS", String(settings_RCWL_MIN_ACTIVE_MILISECONDS));
+    return;
+  }
+  if (key == "NOISE_ALPHA_SHIFT") {
+    sendCmdToArduino("NOISE_AVERAGE_UPDATE_SPEED", String(settings_NOISE_AVERAGE_UPDATE_SPEED));
+    return;
+  }
+  if (key == "SAMPLE_PERIOD_US") {
+    sendCmdToArduino("SAMPLE_PERIOD_MICROSECONDS", String(settings_SAMPLE_PERIOD_MICROSECONDS));
+    return;
+  }
+  if (key == "MIN_PERIOD_US") {
+    sendCmdToArduino("MIN_PERIOD_MICROSECONDS", String(settings_MIN_PERIOD_MICROSECONDS));
+    return;
+  }
+  if (key == "MAX_PERIOD_US") {
+    sendCmdToArduino("MAX_PERIOD_MICROSECONDS", String(settings_MAX_PERIOD_MICROSECONDS));
+    return;
+  }
+
+  // Otherwise send as-is
+  sendCmdToArduino(key, val);
 }
 
 static void handleApiSettingsSet() {
@@ -696,22 +920,16 @@ static void handleApiSettingsSet() {
     return;
   }
 
-  settings_MIN_AMPLITUDE_LEFT = clampInt(settings_MIN_AMPLITUDE_LEFT, 0, 1023);
-  settings_MIN_AMPLITUDE_RIGHT = clampInt(settings_MIN_AMPLITUDE_RIGHT, 0, 1023);
+  // Clamp after applying
+  clampTimingSane();
+  clampAdaptiveSane();
 
-  settings_NOISE_MULT_LEFT = clampInt(settings_NOISE_MULT_LEFT, 0, 300);
-  settings_NOISE_MULT_RIGHT = clampInt(settings_NOISE_MULT_RIGHT, 0, 300);
-
-  settings_NOISE_OFFSET_LEFT = clampInt(settings_NOISE_OFFSET_LEFT, -1023, 1023);
-  settings_NOISE_OFFSET_RIGHT = clampInt(settings_NOISE_OFFSET_RIGHT, -1023, 1023);
-
-  settings_NOISE_ALPHA_SHIFT = clampInt(settings_NOISE_ALPHA_SHIFT, 4, 12);
-
+  // Send correct Arduino key(s)
   if (key == "MIN_AMPLITUDE") {
     sendCmdToArduino("MIN_AMPLITUDE_LEFT", String(settings_MIN_AMPLITUDE_LEFT));
     sendCmdToArduino("MIN_AMPLITUDE_RIGHT", String(settings_MIN_AMPLITUDE_RIGHT));
   } else {
-    sendCmdToArduino(key, val);
+    sendCanonicalSettingToArduino(key, val);
   }
 
   String body = "{\"ok\":true,\"ack\":\"";
@@ -763,6 +981,8 @@ static void setupHttp() {
   server.on("/api/settings/set", handleApiSettingsSet);
   server.on("/api/settings/save", handleApiSettingsSave);
 
+  server.on("/api/live", handleApiLive);
+
   server.onNotFound([]() {
     String uri = server.uri();
     String sdPath = "/webapp" + uri;
@@ -772,17 +992,25 @@ static void setupHttp() {
   server.begin();
 }
 
-// New parser: accepts 4 or 6 ints. If only 4 are present, ledL/ledR default to 0.
-static bool parseCsv4or6(const String &sIn, int &l, int &r, int &rl, int &rr, int &ledL, int &ledR) {
+// Telemetry parser: accepts 4, 6, or 8 ints.
+// 4:  l,r,rl,rr
+// 6:  l,r,rl,rr,ledL,ledR
+// 8:  l,r,rl,rr,ledL,ledR,ovL,ovR
+static bool parseCsv4or6or8(
+  const String &sIn,
+  int &l, int &r, int &rl, int &rr,
+  int &ledL, int &ledR,
+  int &ovL, int &ovR
+) {
   String s = trimLine(sIn);
   if (s.length() == 0) return false;
 
-  int vals[6], idx = 0, start = 0;
+  int vals[8], idx = 0, start = 0;
 
   for (int i = 0; i <= (int)s.length(); i++) {
     char ch = (i == (int)s.length()) ? ',' : s[i];
     if (ch == ',') {
-      if (idx >= 6) return false;
+      if (idx >= 8) return false;
       String part = s.substring(start, i);
       part.trim();
       vals[idx] = part.toInt();
@@ -791,34 +1019,42 @@ static bool parseCsv4or6(const String &sIn, int &l, int &r, int &rl, int &rr, in
     }
   }
 
-  if (idx != 4 && idx != 6) return false;
+  if (idx != 4 && idx != 6 && idx != 8) return false;
 
-  l = vals[0];
-  r = vals[1];
+  l  = vals[0];
+  r  = vals[1];
   rl = vals[2];
   rr = vals[3];
 
-  if (idx == 6) {
+  ledL = 0; ledR = 0; ovL = 0; ovR = 0;
+
+  if (idx >= 6) {
     ledL = vals[4];
     ledR = vals[5];
-  } else {
-    ledL = 0;
-    ledR = 0;
+  }
+  if (idx == 8) {
+    ovL = vals[6];
+    ovR = vals[7];
   }
 
   return true;
 }
 
-static bool parseDataLine(const String &line, int &l, int &r, int &rl, int &rr, int &ledL, int &ledR) {
+static bool parseDataLine(
+  const String &line,
+  int &l, int &r, int &rl, int &rr,
+  int &ledL, int &ledR,
+  int &ovL, int &ovR
+) {
   String s = trimLine(line);
   if (s.length() == 0) return false;
 
   if (s.startsWith("D,")) {
     String rest = trimLine(s.substring(2));
-    return parseCsv4or6(rest, l, r, rl, rr, ledL, ledR);
+    return parseCsv4or6or8(rest, l, r, rl, rr, ledL, ledR, ovL, ovR);
   }
 
-  return parseCsv4or6(s, l, r, rl, rr, ledL, ledR);
+  return parseCsv4or6or8(s, l, r, rl, rr, ledL, ledR, ovL, ovR);
 }
 
 static void handleUartLine(const String &line, unsigned long nowMs) {
@@ -830,22 +1066,27 @@ static void handleUartLine(const String &line, unsigned long nowMs) {
     return;
   }
 
+  // Always parse telemetry for live display
+  int l = 0, r = 0, rl = 0, rr = 0, ledL = 0, ledR = 0, ovL = 0, ovR = 0;
+  if (!parseDataLine(s, l, r, rl, rr, ledL, ledR, ovL, ovR)) return;
+
+  // Feed live rolling average (about 1s)
+  liveFeedSample(l, r, nowMs);
+
+  // Only log to SD when logging is enabled
   if (loggingEnabled && sdOk) {
-    int l = 0, r = 0, rl = 0, rr = 0, ledL = 0, ledR = 0;
-    if (parseDataLine(s, l, r, rl, rr, ledL, ledR)) {
-      unsigned long ts = nowMs - logStartMs;
+    unsigned long ts = nowMs - logStartMs;
 
-      int n = snprintf(outbuf + outlen, OUTBUF_MAX - outlen,
-                       "%d, %d, %d, %d, %d, %d, %lu\n",
-                       l, r, rl, rr, ledL, ledR, (unsigned long)ts);
+    int n = snprintf(outbuf + outlen, OUTBUF_MAX - outlen,
+                 "%d, %d, %d, %d, %d, %d, %d, %d, %lu\n",
+                 l, r, rl, rr, ledL, ledR, ovL, ovR, (unsigned long)ts);
 
-      if (n > 0 && (outlen + n) < OUTBUF_MAX) {
-        outlen += n;
-        outLines++;
-        if (outLines >= BATCH_LINES) flushBatchToSD();
-      } else {
-        flushBatchToSD();
-      }
+    if (n > 0 && (outlen + n) < OUTBUF_MAX) {
+      outlen += n;
+      outLines++;
+      if (outLines >= BATCH_LINES) flushBatchToSD();
+    } else {
+      flushBatchToSD();
     }
   }
 }
@@ -870,13 +1111,16 @@ void setup() {
 
   if (readSettingsFromSD()) {
     pushAllSettingsToArduino();
+  } else {
+    // Even if SD has no settings file, push defaults once at boot.
+    pushAllSettingsToArduino();
   }
 
   wifiStartStaOnly();
   setupHttp();
   httpStarted = true;
 
-  uartLine.reserve(160);
+  uartLine.reserve(200);
   lastAckLine.reserve(160);
 }
 
@@ -906,7 +1150,7 @@ void loop() {
       }
       uartLine = "";
     } else {
-      if (uartLine.length() < 160) uartLine += c;
+      if (uartLine.length() < 180) uartLine += c;
     }
   }
 
