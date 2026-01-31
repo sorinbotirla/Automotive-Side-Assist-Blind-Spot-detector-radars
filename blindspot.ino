@@ -1,5 +1,4 @@
 // Dual HB100 + RCWL blind spot detector
-
 // Timing / periods (ADJUSTABLE)
 // Sample period in microseconds (200us = 5 kHz)
 unsigned long SAMPLE_PERIOD_MICROSECONDS = 200;
@@ -15,7 +14,7 @@ unsigned long MOTION_HOLD_MILISECONDS = 500;
 int EVENTS_TO_TRIGGER = 1;
 const unsigned long EVENT_WINDOW_MILISECONDS = 500;
 
-// RCWL (proximity/parallel sensor) needs to be active this long to override (ms)
+// RCWL led OFF miliseconds:
 unsigned long RCWL_MIN_ACTIVE_MILISECONDS = 1000;
 
 // Pins
@@ -25,7 +24,9 @@ const int HB100_RIGHT_PIN = A1;
 const int RCWL_LEFT_PIN = 2;
 const int RCWL_RIGHT_PIN = 3;
 
-const int LED_LEFT_PIN = 8;
+const bool RCWL_ACTIVE_LOW = false;
+
+const int LED_LEFT_PIN = 10;
 const int LED_RIGHT_PIN = 9;
 
 bool ENABLE_RCWL_LEFT = true;
@@ -71,7 +72,8 @@ long noiseAvgAbsRight = 0;
 unsigned long rcwlRightLastHigh = 0;
 
 // Serial command parsing
-String cmdLine = "";
+static char cmdLine[180];
+static uint8_t cmdLen = 0;
 
 static int clampInt(int v, int lo, int hi) {
   if (v < lo) return lo;
@@ -98,6 +100,19 @@ static void ackKV(const String &key, const String &val) {
   Serial.print(",");
   Serial.println(val);
 }
+
+// PWM fade + photoresistor settings
+unsigned long FADE_IN_MILISECONDS = 600;
+unsigned long FADE_OUT_MILISECONDS = 1500;
+
+bool NIGHT_DIMMING_ENABLE = false;
+int NIGHT_DIMMING_PERCENT = 70;
+
+const int PHOTO_PIN = A6;
+int PHOTO_DAY_TH = 650;
+int PHOTO_NIGHT_TH = 550;
+unsigned long PHOTO_CONFIRM_MILISECONDS = 1500;
+int PHOTO_AVERAGE_UPDATE_SPEED = 4;
 
 static void applySetting(const String &key, const String &val) {
   String k = key, v = val;
@@ -202,8 +217,56 @@ static void applySetting(const String &key, const String &val) {
   }
 
   if (k == "NOISE_AVERAGE_UPDATE_SPEED") {
-    NOISE_AVERAGE_UPDATE_SPEED = clampInt(v.toInt(), 4, 12);
+    NOISE_AVERAGE_UPDATE_SPEED = clampInt(v.toInt(), 4, 1000);
     ackKV(k, String(NOISE_AVERAGE_UPDATE_SPEED));
+    return;
+  }
+
+  if (k == "FADE_IN_MILISECONDS") {
+    FADE_IN_MILISECONDS = clampULong(v.toInt(), 0, 10000UL);
+    ackKV(k, String(FADE_IN_MILISECONDS));
+    return;
+  }
+
+  if (k == "FADE_OUT_MILISECONDS") {
+    FADE_OUT_MILISECONDS = clampULong(v.toInt(), 0, 10000UL);
+    ackKV(k, String(FADE_OUT_MILISECONDS));
+    return;
+  }
+
+  if (k == "NIGHT_DIMMING_ENABLE") {
+    NIGHT_DIMMING_ENABLE = strToBool(v);
+    ackKV(k, NIGHT_DIMMING_ENABLE ? "1" : "0");
+    return;
+  }
+
+  if (k == "NIGHT_DIMMING_PERCENT") {
+    NIGHT_DIMMING_PERCENT = clampInt(v.toInt(), 1, 100);
+    ackKV(k, String(NIGHT_DIMMING_PERCENT));
+    return;
+  }
+
+  if (k == "PHOTO_DAY_TH") {
+    PHOTO_DAY_TH = clampInt(v.toInt(), 0, 1023);
+    ackKV(k, String(PHOTO_DAY_TH));
+    return;
+  }
+
+  if (k == "PHOTO_NIGHT_TH") {
+    PHOTO_NIGHT_TH = clampInt(v.toInt(), 0, 1023);
+    ackKV(k, String(PHOTO_NIGHT_TH));
+    return;
+  }
+
+  if (k == "PHOTO_CONFIRM_MILISECONDS") {
+    PHOTO_CONFIRM_MILISECONDS = clampULong(v.toInt(), 0, 10000UL);
+    ackKV(k, String(PHOTO_CONFIRM_MILISECONDS));
+    return;
+  }
+
+  if (k == "PHOTO_AVERAGE_UPDATE_SPEED") {
+    PHOTO_AVERAGE_UPDATE_SPEED = clampInt(v.toInt(), 1, 10);
+    ackKV(k, String(PHOTO_AVERAGE_UPDATE_SPEED));
     return;
   }
 
@@ -216,25 +279,33 @@ static void handleSerialCommands() {
     if (c == '\r') continue;
 
     if (c == '\n') {
-      String s = cmdLine;
-      cmdLine = "";
-      s.trim();
-      if (s.length() == 0) continue;
+      cmdLine[cmdLen] = 0;
+      cmdLen = 0;
 
-      if (!s.startsWith("C,")) continue;
+      char *s = cmdLine;
+      while (*s == ' ' || *s == '\t') s++;
+      if (!*s) continue;
 
-      int p1 = s.indexOf(',', 2);
-      if (p1 < 0) continue;
+      if (!(s[0] == 'C' && s[1] == ',')) continue;
 
-      String key = s.substring(2, p1);
-      String val = s.substring(p1 + 1);
+      char *p1 = strchr(s + 2, ',');
+      if (!p1) continue;
 
+      *p1 = 0;
+      String key = String(s + 2);
+      String val = String(p1 + 1);
       applySetting(key, val);
+      continue;
+    }
+
+    if (cmdLen < sizeof(cmdLine) - 1) {
+      cmdLine[cmdLen++] = c;
     } else {
-      if (cmdLine.length() < 160) cmdLine += c;
+      cmdLen = 0;
     }
   }
 }
+
 
 // RCWL override
 // tolerate brief LOW glitches while RCWL is "basically active"
@@ -253,21 +324,19 @@ bool rcwlOverride(
     return false;
   }
 
-  bool high = (digitalRead(pin) == HIGH);
+  bool high = (digitalRead(pin) == (RCWL_ACTIVE_LOW ? LOW : HIGH));
 
   if (high) {
     lastHighMs = nowMs;
-    if (startMs == 0) startMs = nowMs;
+    startMs = nowMs;
   } else {
-    // if it went LOW only briefly, treat as still HIGH
     if (lastHighMs != 0 && (nowMs - lastHighMs) <= RCWL_GLITCH_TOLERANCE_MILISECONDS) {
       high = true;
-    } else {
-      startMs = 0;
     }
   }
 
-  return (startMs != 0 && (nowMs - startMs >= RCWL_MIN_ACTIVE_MILISECONDS));
+  if (lastHighMs == 0) return false;
+  return ((unsigned long)(nowMs - lastHighMs) <= RCWL_MIN_ACTIVE_MILISECONDS);
 }
 
 static int computeAdaptiveThreshold(long noiseAvgAbs, int minAmp, int multX10, int offset) {
@@ -295,12 +364,16 @@ bool processHb(
 ) {
   baseline += (raw - baseline) >> 6;
 
-  int val = raw - baseline;
+  int val = raw - (int)baseline;
 
   int a = val;
   if (a < 0) a = -a;
 
-  noiseAvgAbs += ((long)a - noiseAvgAbs) >> NOISE_AVERAGE_UPDATE_SPEED;
+  if (a > noiseAvgAbs) {
+    noiseAvgAbs += ((long)a - noiseAvgAbs) >> NOISE_AVERAGE_UPDATE_SPEED;
+  } else {
+    noiseAvgAbs -= (noiseAvgAbs - (long)a) >> NOISE_AVERAGE_UPDATE_SPEED;
+  }
 
   bool sign = (val > 0);
   bool valid = false;
@@ -339,6 +412,185 @@ bool processHb(
   return (nowMs < expireMs);
 }
 
+class LedFader {
+public:
+  void begin(uint8_t pwmPin, bool invertedPwm, bool useGamma) {
+    _pin = pwmPin;
+    _inverted = invertedPwm;
+    _gamma = useGamma;
+    pinMode(_pin, OUTPUT);
+    _cur = 0;
+    _mode = IDLE;
+    writePwm(0);
+  }
+
+  void fadeTo(uint8_t target, unsigned long durationMs) {
+    unsigned long now = millis();
+    uint8_t currentNow = current();
+
+    _startB = currentNow;
+    _endB = target;
+    _t0 = now;
+    _dur = (durationMs == 0) ? 1 : durationMs;
+    _mode = FADE;
+
+    _cur = currentNow;
+    writePwm(_cur);
+  }
+
+  void update() {
+    if (_mode == IDLE) return;
+
+    unsigned long now = millis();
+    uint8_t b = interpolate(now, _t0, _dur, _startB, _endB);
+    _cur = b;
+    writePwm(_cur);
+
+    if ((unsigned long)(now - _t0) >= _dur) {
+      _cur = _endB;
+      writePwm(_cur);
+      _mode = IDLE;
+    }
+  }
+
+  uint8_t current() const {
+    if (_mode == IDLE) return _cur;
+    unsigned long now = millis();
+    return interpolate(now, _t0, _dur, _startB, _endB);
+  }
+
+  bool isOffStable() const { return (_mode == IDLE && _cur == 0); }
+  bool isOnStable() const { return (_mode == IDLE && _cur == 255); }
+  bool isIdle() const { return (_mode == IDLE); }
+
+private:
+  enum Mode : uint8_t { IDLE, FADE };
+
+  uint8_t _pin = 255;
+  bool _inverted = false;
+  bool _gamma = true;
+
+  Mode _mode = IDLE;
+
+  uint8_t _cur = 0;
+  uint8_t _startB = 0;
+  uint8_t _endB = 0;
+
+  unsigned long _t0 = 0;
+  unsigned long _dur = 1;
+
+  static uint8_t gamma8(uint8_t x) {
+    return (uint16_t(x) * uint16_t(x) + 255) >> 8;
+  }
+
+  static uint8_t interpolate(unsigned long now, unsigned long t0, unsigned long dur, uint8_t a, uint8_t b) {
+    unsigned long dt = (unsigned long)(now - t0);
+    if (dt >= dur) return b;
+
+    int16_t diff = (int16_t)b - (int16_t)a;
+    int16_t val = (int16_t)a + (int32_t)diff * (int32_t)dt / (int32_t)dur;
+
+    if (val < 0) val = 0;
+    if (val > 255) val = 255;
+    return (uint8_t)val;
+  }
+
+  void writePwm(uint8_t logicalBrightness) const {
+    uint8_t out = _gamma ? gamma8(logicalBrightness) : logicalBrightness;
+    if (_inverted) out = 255 - out;
+    analogWrite(_pin, out);
+  }
+};
+
+LedFader ledLeft;
+LedFader ledRight;
+
+static int photoAvg = 0;
+static bool isNight = false;
+static unsigned long photoCandidateStart = 0;
+
+static int iabs(int v) { return (v < 0) ? -v : v; }
+
+static void photoInit() {
+  pinMode(PHOTO_PIN, INPUT);
+  int r = analogRead(PHOTO_PIN);
+  photoAvg = (r < 0) ? 0 : r;
+  isNight = false;
+  photoCandidateStart = 0;
+}
+
+static void photoUpdate(unsigned long nowMs) {
+  int raw = analogRead(PHOTO_PIN);
+  if (raw < 0) raw = 0;
+  if (raw > 1023) raw = 1023;
+
+  int shift = PHOTO_AVERAGE_UPDATE_SPEED;
+  if (shift < 1) shift = 1;
+  if (shift > 10) shift = 10;
+
+  photoAvg += (raw - photoAvg) >> shift;
+
+  if (!NIGHT_DIMMING_ENABLE) {
+    isNight = false;
+    photoCandidateStart = 0;
+    return;
+  }
+
+  bool wantNight = isNight;
+
+  if (!isNight) {
+    if (photoAvg < PHOTO_NIGHT_TH) wantNight = true;
+  } else {
+    if (photoAvg > PHOTO_DAY_TH) wantNight = false;
+  }
+
+  if (wantNight == isNight) {
+    photoCandidateStart = 0;
+    return;
+  }
+
+  if (photoCandidateStart == 0) photoCandidateStart = nowMs;
+  if ((unsigned long)(nowMs - photoCandidateStart) >= PHOTO_CONFIRM_MILISECONDS) {
+    isNight = wantNight;
+    photoCandidateStart = 0;
+  }
+}
+
+static uint8_t currentMaxBrightness() {
+  int pct = NIGHT_DIMMING_PERCENT;
+  if (pct < 1) pct = 1;
+  if (pct > 100) pct = 100;
+
+  if (!NIGHT_DIMMING_ENABLE) return 255;
+  if (!isNight) return 255;
+
+  return (uint8_t)((255L * (long)pct) / 100L);
+}
+
+static void applyLedTargets(bool wantOnLeft, bool wantOnRight, uint8_t cap) {
+  static bool lastWantOnLeft = false;
+  static bool lastWantOnRight = false;
+  static uint8_t lastCap = 255;
+
+  if (wantOnLeft != lastWantOnLeft) {
+    if (wantOnLeft) ledLeft.fadeTo(cap, FADE_IN_MILISECONDS);
+    else ledLeft.fadeTo(0, FADE_OUT_MILISECONDS);
+    lastWantOnLeft = wantOnLeft;
+  } else if (wantOnLeft && cap != lastCap && ledLeft.isIdle()) {
+    ledLeft.fadeTo(cap, 120);
+  }
+
+  if (wantOnRight != lastWantOnRight) {
+    if (wantOnRight) ledRight.fadeTo(cap, FADE_IN_MILISECONDS);
+    else ledRight.fadeTo(0, FADE_OUT_MILISECONDS);
+    lastWantOnRight = wantOnRight;
+  } else if (wantOnRight && cap != lastCap && ledRight.isIdle()) {
+    ledRight.fadeTo(cap, 120);
+  }
+
+  lastCap = cap;
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -347,16 +599,14 @@ void setup() {
   pinMode(HB100_LEFT_PIN, INPUT);
   pinMode(HB100_RIGHT_PIN, INPUT);
 
-  pinMode(RCWL_LEFT_PIN, INPUT);
-  pinMode(RCWL_RIGHT_PIN, INPUT);
+  pinMode(RCWL_LEFT_PIN, INPUT_PULLUP);
+  pinMode(RCWL_RIGHT_PIN, INPUT_PULLUP);
+  
 
-  pinMode(LED_LEFT_PIN, OUTPUT);
-  pinMode(LED_RIGHT_PIN, OUTPUT);
+  ledLeft.begin(LED_LEFT_PIN, false, true);
+  ledRight.begin(LED_RIGHT_PIN, false, true);
 
-  digitalWrite(LED_LEFT_PIN, HIGH);
-  digitalWrite(LED_RIGHT_PIN, HIGH);
-
-  cmdLine.reserve(160);
+  photoInit();
 
   // start aligned, prevent "catch-up bursts"
   lastSampleMicroseconds = micros();
@@ -365,6 +615,9 @@ void setup() {
 void loop() {
   handleSerialCommands();
 
+  ledLeft.update();
+  ledRight.update();
+
   unsigned long nowMicros = micros();
   if (nowMicros - lastSampleMicroseconds < SAMPLE_PERIOD_MICROSECONDS) return;
 
@@ -372,6 +625,8 @@ void loop() {
   lastSampleMicroseconds = nowMicros;
 
   unsigned long nowMs = millis();
+
+  photoUpdate(nowMs);
 
   // ADC settle
   analogRead(HB100_LEFT_PIN);
@@ -413,12 +668,12 @@ void loop() {
 
   bool rcwlIsOverrideLeft  = rcwlOverride(RCWL_LEFT_PIN,  rcwlLeftStart,  rcwlLeftLastHigh,  nowMs, ENABLE_RCWL_LEFT);
   bool rcwlIsOverrideRight = rcwlOverride(RCWL_RIGHT_PIN, rcwlRightStart, rcwlRightLastHigh, nowMs, ENABLE_RCWL_RIGHT);
+
   int ledLeftOn  = (hb100DetectedMotionLeft  && !rcwlIsOverrideLeft)  ? 1 : 0;
   int ledRightOn = (hb100DetectedMotionRight && !rcwlIsOverrideRight) ? 1 : 0;
 
-  // RCWL override (LED is active-low for the relay)
-  digitalWrite(LED_LEFT_PIN,  ledLeftOn  ? LOW : HIGH);
-  digitalWrite(LED_RIGHT_PIN, ledRightOn ? LOW : HIGH);
+  uint8_t cap = currentMaxBrightness();
+  applyLedTargets(ledLeftOn == 1, ledRightOn == 1, cap);
 
   // Telemetry to ESP32 every 100ms:
   // D,valLeft,valRight,rcwlLeftRaw,rcwlRightRaw,ledLeftOn,ledRightOn,rcwlOverrideLeft,rcwlOverrideRight
@@ -428,8 +683,8 @@ void loop() {
     int valLeft  = rawLeft  - (int)baselineLeft;
     int valRight = rawRight - (int)baselineRight;
 
-    int rcwlLeftRaw  = (digitalRead(RCWL_LEFT_PIN)  == HIGH) ? 1 : 0;
-    int rcwlRightRaw = (digitalRead(RCWL_RIGHT_PIN) == HIGH) ? 1 : 0;
+    int rcwlLeftRaw  = (digitalRead(RCWL_LEFT_PIN)  == (RCWL_ACTIVE_LOW ? LOW : HIGH)) ? 1 : 0;
+    int rcwlRightRaw = (digitalRead(RCWL_RIGHT_PIN) == (RCWL_ACTIVE_LOW ? LOW : HIGH)) ? 1 : 0;
 
     Serial.print("D,");
     Serial.print(valLeft);

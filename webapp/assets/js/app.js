@@ -45,14 +45,10 @@ var RadarLogger = function(){
 
     _self.liveTimer = null;
 
-    // Canonical keys + legacy aliases (read + send mapping)
     _self.keyAliases = {
-        // noise update speed rename
         "NOISE_ALPHA_SHIFT": "NOISE_AVERAGE_UPDATE_SPEED",
-        // ms renames
         "MOTION_HOLD_MS": "MOTION_HOLD_MILISECONDS",
         "RCWL_MIN_ACTIVE_MS": "RCWL_MIN_ACTIVE_MILISECONDS",
-        // us renames
         "SAMPLE_PERIOD_US": "SAMPLE_PERIOD_MICROSECONDS",
         "MIN_PERIOD_US": "MIN_PERIOD_MICROSECONDS",
         "MAX_PERIOD_US": "MAX_PERIOD_MICROSECONDS"
@@ -116,13 +112,7 @@ var RadarLogger = function(){
     };
 
     _self.isValidIntString = function(v){
-        // allow "0", "-1", "123"; disallow "" or "-" or "12a"
         return (typeof v === "string") && (/^-?\d+$/.test($.trim(v)));
-    };
-
-    _self.getFieldValue = function($el){
-        if (!$el || !$el.length) return "";
-        return $el.val();
     };
 
     _self.setFieldValueIfExists = function(id, val){
@@ -181,12 +171,8 @@ var RadarLogger = function(){
             $("#saveSettings").on("click", function(e){ e.preventDefault(); _self.settingsSave(); });
         }
 
-        // Default buttons support:
-        // 1) <button class="defBtn" data-default-for="FIELD_ID" data-default="123">Default (123)</button>
-        // 2) <button class="defBtn" data-key="CANONICAL_KEY" data-default="123">Default (123)</button>
         $(document).on("click", ".btnDefault", function(e){
             e.preventDefault();
-
             if (_self.uiLoading) return;
 
             var $b = $(this),
@@ -195,26 +181,17 @@ var RadarLogger = function(){
 
             if (!key || typeof defVal === "undefined") return;
 
-            // Update input/select if it exists
             var $field = $("#" + key);
             if ($field.length) {
-                if ($field.is("select")) {
-                    $field.val(String(defVal));
-                } else {
-                    $field.val(defVal);
-                }
+                if ($field.is("select")) $field.val(String(defVal));
+                else $field.val(defVal);
             }
 
-            // Update cache so blur revert works
             _self.settingsCache[key] = String(defVal);
-
-            // Send immediately
             _self.settingsSetNow(key, String(defVal));
         });
 
-
         if(_self.state.isSettingsPage){
-            // input typing: debounced, only when value is a valid integer string
             $(document).on("input", ".settingsGrid input", function(e){
                 if (_self.uiLoading) return;
 
@@ -222,14 +199,11 @@ var RadarLogger = function(){
                     val = $(this).val();
 
                 if(!id) return;
-
-                // do not spam invalid/temporary states (prevents empty -> 0 clamp issues)
                 if (!_self.isValidIntString(String(val))) return;
 
                 _self.settingsSetDebounced(id, val);
             });
 
-            // blur: if invalid, revert to last good value; if valid, apply now
             $(document).on("blur", ".settingsGrid input", function(e){
                 if (_self.uiLoading) return;
 
@@ -289,11 +263,9 @@ var RadarLogger = function(){
     };
 
     _self.settingsSet = function(key, value, seq){
-        // If HTML id is a legacy key, map it for sending, but keep UI id as-is.
         var sendKey = _self.normalizeKeyForSend(key);
         var sendValue = value;
 
-        // Normalize booleans from selects (true/false)
         if (value === true) sendValue = "true";
         if (value === false) sendValue = "false";
 
@@ -315,9 +287,7 @@ var RadarLogger = function(){
 
                 if (ack) _self.setAck(ack);
 
-                // Update cache using the UI key/id (so blur revert works)
                 _self.settingsCache[key] = sendValue;
-
                 _self.setStatus("Applied: " + sendKey + " = " + sendValue, false);
             }catch(e){
                 _self.setStatus("set parse error", true);
@@ -327,7 +297,22 @@ var RadarLogger = function(){
 
     _self.startLiveHud = function(){
         if (_self.liveTimer) return;
+
         if (!document.getElementById("hbLeftAvg") && !document.getElementById("hbRightAvg")) return;
+
+        var setRcwlState = function($el, on){
+            if(!$el || !$el.length) return;
+
+            $el.removeClass("stateOn stateOff");
+
+            if(on){
+                $el.addClass("stateOn");
+                $el.text("RCWL ON");
+            } else {
+                $el.addClass("stateOff");
+                $el.text("RCWL OFF");
+            }
+        };
 
         var tick = function(){
             _self.apiGet("/api/live", function(code, txt){
@@ -337,20 +322,32 @@ var RadarLogger = function(){
                     var o = JSON.parse(txt);
                     if(!o || !o.ok) return;
 
-                    if(document.getElementById("hbLeftAvg")) $("#hbLeftAvg").text(String(o.hb_left_avg));
-                    if(document.getElementById("hbRightAvg")) $("#hbRightAvg").text(String(o.hb_right_avg));
+                    // Prefer last sample (more responsive for "alive" display)
+                    if (document.getElementById("hbLeftAvg")) {
+                        if (typeof o.hb_left_last !== "undefined") $("#hbLeftAvg").text(String(o.hb_left_last));
+                        else if (typeof o.hb_left_avg !== "undefined") $("#hbLeftAvg").text(String(o.hb_left_avg));
+                    }
 
-                    if(document.getElementById("hbLeftAbs")) $("#hbLeftAbs").text("abs avg: " + String(o.hb_left_absavg));
-                    if(document.getElementById("hbRightAbs")) $("#hbRightAbs").text("abs avg: " + String(o.hb_right_absavg));
+                    if (document.getElementById("hbRightAvg")) {
+                        if (typeof o.hb_right_last !== "undefined") $("#hbRightAvg").text(String(o.hb_right_last));
+                        else if (typeof o.hb_right_avg !== "undefined") $("#hbRightAvg").text(String(o.hb_right_avg));
+                    }
 
-                    // Optional: show stale data (if you add #hbAge somewhere)
-                    if(document.getElementById("hbAge")) $("#hbAge").text("age: " + String(o.age_ms) + " ms");
+                    var rl = (typeof o.rcwl_left_raw !== "undefined") ? o.rcwl_left_raw :
+                        ((typeof o.rcwl_left !== "undefined") ? o.rcwl_left : 0);
+
+                    var rr = (typeof o.rcwl_right_raw !== "undefined") ? o.rcwl_right_raw :
+                        ((typeof o.rcwl_right !== "undefined") ? o.rcwl_right : 0);
+
+                    if (document.getElementById("rcwlLeftSub")) setRcwlState($("#rcwlLeftSub"), !!rl);
+                    if (document.getElementById("rcwlRightSub")) setRcwlState($("#rcwlRightSub"), !!rr);
+
                 }catch(e){}
             });
         };
 
         tick();
-        _self.liveTimer = setInterval(tick, 1000);
+        _self.liveTimer = setInterval(tick, 500);
     };
 
     _self.renderViewerShell = function(){
@@ -636,7 +633,6 @@ var RadarLogger = function(){
             p = line.split(",");
             if(!p || p.length < 5) continue;
 
-            // parse all tokens to ints (tolerate extra fields at the end)
             for(j=0;j<p.length;j++){
                 v = parseInt($.trim(p[j]), 10);
                 if (!isNaN(v)) ints.push(v);
@@ -649,10 +645,8 @@ var RadarLogger = function(){
             rl = ints[2];
             rr = ints[3];
 
-            // timestamp = last int (more tolerant)
             tsMs = ints[ints.length - 1];
 
-            // if standard 7-field format exists, ledL/ledR are 5th/6th
             if (ints.length >= 7) {
                 ledL = ints[4];
                 ledR = ints[5];
@@ -731,9 +725,6 @@ var RadarLogger = function(){
 
         _self.uiLoading = 1;
 
-        // Store canonical values in cache for blur revert; also fill UI if elements exist.
-
-        // Timing / periods
         var sp = _self.pickFirst(o, ["SAMPLE_PERIOD_MICROSECONDS", "SAMPLE_PERIOD_US"]);
         if (typeof sp !== "undefined") { _self.settingsCache["SAMPLE_PERIOD_MICROSECONDS"] = sp; _self.setFieldValueIfExists("SAMPLE_PERIOD_MICROSECONDS", sp); }
 
@@ -743,67 +734,43 @@ var RadarLogger = function(){
         var mx = _self.pickFirst(o, ["MAX_PERIOD_MICROSECONDS", "MAX_PERIOD_US"]);
         if (typeof mx !== "undefined") { _self.settingsCache["MAX_PERIOD_MICROSECONDS"] = mx; _self.setFieldValueIfExists("MAX_PERIOD_MICROSECONDS", mx); }
 
-        // Motion hold
         var mh = _self.pickFirst(o, ["MOTION_HOLD_MILISECONDS", "MOTION_HOLD_MS"]);
         if (typeof mh !== "undefined") { _self.settingsCache["MOTION_HOLD_MILISECONDS"] = mh; _self.setFieldValueIfExists("MOTION_HOLD_MILISECONDS", mh); }
 
-        // Events
         if (typeof o.EVENTS_TO_TRIGGER !== "undefined") {
             _self.settingsCache["EVENTS_TO_TRIGGER"] = o.EVENTS_TO_TRIGGER;
             _self.setFieldValueIfExists("EVENTS_TO_TRIGGER", o.EVENTS_TO_TRIGGER);
         }
 
-        // RCWL
         var rc = _self.pickFirst(o, ["RCWL_MIN_ACTIVE_MILISECONDS", "RCWL_MIN_ACTIVE_MS"]);
         if (typeof rc !== "undefined") { _self.settingsCache["RCWL_MIN_ACTIVE_MILISECONDS"] = rc; _self.setFieldValueIfExists("RCWL_MIN_ACTIVE_MILISECONDS", rc); }
 
         if (typeof o.ENABLE_RCWL_LEFT !== "undefined") { _self.settingsCache["ENABLE_RCWL_LEFT"] = o.ENABLE_RCWL_LEFT ? "true" : "false"; _self.setSelectBoolIfExists("ENABLE_RCWL_LEFT", !!o.ENABLE_RCWL_LEFT); }
         if (typeof o.ENABLE_RCWL_RIGHT !== "undefined") { _self.settingsCache["ENABLE_RCWL_RIGHT"] = o.ENABLE_RCWL_RIGHT ? "true" : "false"; _self.setSelectBoolIfExists("ENABLE_RCWL_RIGHT", !!o.ENABLE_RCWL_RIGHT); }
 
-        // Threshold
-        if (typeof o.MIN_AMPLITUDE !== "undefined") {
-            _self.settingsCache["MIN_AMPLITUDE"] = o.MIN_AMPLITUDE;
-            _self.setFieldValueIfExists("MIN_AMPLITUDE", o.MIN_AMPLITUDE);
-        }
+        if (typeof o.MIN_AMPLITUDE_LEFT !== "undefined") { _self.settingsCache["MIN_AMPLITUDE_LEFT"] = o.MIN_AMPLITUDE_LEFT; _self.setFieldValueIfExists("MIN_AMPLITUDE_LEFT", o.MIN_AMPLITUDE_LEFT); }
+        if (typeof o.MIN_AMPLITUDE_RIGHT !== "undefined") { _self.settingsCache["MIN_AMPLITUDE_RIGHT"] = o.MIN_AMPLITUDE_RIGHT; _self.setFieldValueIfExists("MIN_AMPLITUDE_RIGHT", o.MIN_AMPLITUDE_RIGHT); }
 
-        if (typeof o.MIN_AMPLITUDE_LEFT !== "undefined") {
-            _self.settingsCache["MIN_AMPLITUDE_LEFT"] = o.MIN_AMPLITUDE_LEFT;
-            _self.setFieldValueIfExists("MIN_AMPLITUDE_LEFT", o.MIN_AMPLITUDE_LEFT);
-        }
+        if (typeof o.NOISE_MULT_LEFT !== "undefined") { _self.settingsCache["NOISE_MULT_LEFT"] = o.NOISE_MULT_LEFT; _self.setFieldValueIfExists("NOISE_MULT_LEFT", o.NOISE_MULT_LEFT); }
+        if (typeof o.NOISE_MULT_RIGHT !== "undefined") { _self.settingsCache["NOISE_MULT_RIGHT"] = o.NOISE_MULT_RIGHT; _self.setFieldValueIfExists("NOISE_MULT_RIGHT", o.NOISE_MULT_RIGHT); }
 
-        if (typeof o.MIN_AMPLITUDE_RIGHT !== "undefined") {
-            _self.settingsCache["MIN_AMPLITUDE_RIGHT"] = o.MIN_AMPLITUDE_RIGHT;
-            _self.setFieldValueIfExists("MIN_AMPLITUDE_RIGHT", o.MIN_AMPLITUDE_RIGHT);
-        }
-
-        if (typeof o.NOISE_MULT_LEFT !== "undefined") {
-            _self.settingsCache["NOISE_MULT_LEFT"] = o.NOISE_MULT_LEFT;
-            _self.setFieldValueIfExists("NOISE_MULT_LEFT", o.NOISE_MULT_LEFT);
-        }
-
-        if (typeof o.NOISE_MULT_RIGHT !== "undefined") {
-            _self.settingsCache["NOISE_MULT_RIGHT"] = o.NOISE_MULT_RIGHT;
-            _self.setFieldValueIfExists("NOISE_MULT_RIGHT", o.NOISE_MULT_RIGHT);
-        }
-
-        if (typeof o.NOISE_OFFSET_LEFT !== "undefined") {
-            _self.settingsCache["NOISE_OFFSET_LEFT"] = o.NOISE_OFFSET_LEFT;
-            _self.setFieldValueIfExists("NOISE_OFFSET_LEFT", o.NOISE_OFFSET_LEFT);
-        }
-
-        if (typeof o.NOISE_OFFSET_RIGHT !== "undefined") {
-            _self.settingsCache["NOISE_OFFSET_RIGHT"] = o.NOISE_OFFSET_RIGHT;
-            _self.setFieldValueIfExists("NOISE_OFFSET_RIGHT", o.NOISE_OFFSET_RIGHT);
-        }
+        if (typeof o.NOISE_OFFSET_LEFT !== "undefined") { _self.settingsCache["NOISE_OFFSET_LEFT"] = o.NOISE_OFFSET_LEFT; _self.setFieldValueIfExists("NOISE_OFFSET_LEFT", o.NOISE_OFFSET_LEFT); }
+        if (typeof o.NOISE_OFFSET_RIGHT !== "undefined") { _self.settingsCache["NOISE_OFFSET_RIGHT"] = o.NOISE_OFFSET_RIGHT; _self.setFieldValueIfExists("NOISE_OFFSET_RIGHT", o.NOISE_OFFSET_RIGHT); }
 
         var nu = _self.pickFirst(o, ["NOISE_AVERAGE_UPDATE_SPEED", "NOISE_ALPHA_SHIFT"]);
         if (typeof nu !== "undefined") {
             _self.settingsCache["NOISE_AVERAGE_UPDATE_SPEED"] = nu;
             _self.setFieldValueIfExists("NOISE_AVERAGE_UPDATE_SPEED", nu);
+        }
 
-            // if old field exists in HTML, populate it too
-            _self.settingsCache["NOISE_ALPHA_SHIFT"] = nu;
-            _self.setFieldValueIfExists("NOISE_ALPHA_SHIFT", nu);
+        // Fade settings (new)
+        if (typeof o.FADE_IN_MILISECONDS !== "undefined") {
+            _self.settingsCache["FADE_IN_MILISECONDS"] = o.FADE_IN_MILISECONDS;
+            _self.setFieldValueIfExists("FADE_IN_MILISECONDS", o.FADE_IN_MILISECONDS);
+        }
+        if (typeof o.FADE_OUT_MILISECONDS !== "undefined") {
+            _self.settingsCache["FADE_OUT_MILISECONDS"] = o.FADE_OUT_MILISECONDS;
+            _self.setFieldValueIfExists("FADE_OUT_MILISECONDS", o.FADE_OUT_MILISECONDS);
         }
 
         _self.uiLoading = 0;
@@ -867,7 +834,7 @@ var RadarLogger = function(){
 
         if(_self.state.isSettingsPage){
             _self.settingsLoad();
-            _self.startLiveHud(); // shows HB100 1s averages if the HTML has the elements
+            _self.startLiveHud();
             return;
         }
 

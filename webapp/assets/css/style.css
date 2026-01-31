@@ -390,3 +390,13 @@ a:active {
 @media (max-width: 720px){
   .liveHud { flex-direction:column; }
 }
+
+.stateOn {
+  color: #3bd671;
+  font-weight: 700;
+}
+
+.stateOff {
+  color: #ff4b4b;
+  font-weight: 700;
+}

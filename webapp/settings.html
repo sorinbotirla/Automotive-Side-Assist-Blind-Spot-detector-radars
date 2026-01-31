@@ -25,14 +25,14 @@
         <div class="sectionTitle">Global</div>
         <div class="liveHud">
             <div class="liveCard">
-                <div class="liveTitle">HB100 Left avg (1s)</div>
+                <div class="liveTitle">HB100 Left</div>
                 <div class="liveValue" id="hbLeftAvg">-</div>
-                <div class="liveSub" id="hbLeftAbs">abs avg: -</div>
+                <div class="liveSub" id="rcwlLeftSub">RCWL Left: -</div>
             </div>
             <div class="liveCard">
-                <div class="liveTitle">HB100 Right avg (1s)</div>
+                <div class="liveTitle">HB100 Right</div>
                 <div class="liveValue" id="hbRightAvg">-</div>
-                <div class="liveSub" id="hbRightAbs">abs avg: -</div>
+                <div class="liveSub" id="rcwlRightSub">RCWL Right: -</div>
             </div>
         </div>
         <div class="settingsGrid">
@@ -97,10 +97,10 @@
             </div>
 
             <div class="row">
-                <div class="label">Proximity confirm time (milliseconds)</div>
+                <div class="label">Side objects LED disable duration</div>
                 <div class="field">
                     <input type="number" id="RCWL_MIN_ACTIVE_MILISECONDS" step="50" />
-                    <div class="help">Proximity must stay on this long to override.</div>
+                    <div class="help">When detected, side objects turn off led this duration</div>
                 </div>
                 <div class="tools">
                     <button type="button" class="btnDefault" data-key="RCWL_MIN_ACTIVE_MILISECONDS" data-default="1000">Default</button>
@@ -117,6 +117,30 @@
                 <div class="tools">
                     <button type="button" class="btnDefault" data-key="NOISE_AVERAGE_UPDATE_SPEED" data-default="7">Default</button>
                     <span class="defVal">7</span>
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="label">Fade in (milliseconds)</div>
+                <div class="field">
+                    <input type="number" id="FADE_IN_MILISECONDS" step="50" />
+                    <div class="help">Time to ramp LED up.</div>
+                </div>
+                <div class="tools">
+                    <button type="button" class="btnDefault" data-key="FADE_IN_MILISECONDS" data-default="600">Default</button>
+                    <span class="defVal">600</span>
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="label">Fade out (milliseconds)</div>
+                <div class="field">
+                    <input type="number" id="FADE_OUT_MILISECONDS" step="50" />
+                    <div class="help">Time to ramp LED down.</div>
+                </div>
+                <div class="tools">
+                    <button type="button" class="btnDefault" data-key="FADE_OUT_MILISECONDS" data-default="1500">Default</button>
+                    <span class="defVal">1500</span>
                 </div>
             </div>
         </div>

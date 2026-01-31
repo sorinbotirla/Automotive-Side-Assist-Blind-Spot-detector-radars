@@ -62,6 +62,9 @@ static unsigned long settings_MAX_PERIOD_MICROSECONDS = 500000;
 // Motion hold
 static unsigned long settings_MOTION_HOLD_MILISECONDS = 500;
 
+static unsigned long settings_FADE_IN_MILISECONDS = 600;
+static unsigned long settings_FADE_OUT_MILISECONDS = 1500;
+
 // Event counting
 static int settings_EVENTS_TO_TRIGGER = 1;
 
@@ -99,14 +102,23 @@ static int liveAbsAvgR = 0;
 
 static int liveLastL = 0;
 static int liveLastR = 0;
+
+static int liveRcwlLeft = 0;
+static int liveRcwlRight = 0;
+static int liveOvLeft = 0;
+static int liveOvRight = 0;
+
 static unsigned long liveLastSampleMs = 0;
 
 static int iabs(int v) { return (v < 0) ? -v : v; }
 
-static void liveFeedSample(int l, int r, unsigned long nowMs) {
+static void liveFeedSample(int l, int r, int rl, int rr, unsigned long nowMs) {
   liveLastL = l;
   liveLastR = r;
   liveLastSampleMs = nowMs;
+
+  liveRcwlLeft = (rl ? 1 : 0);
+  liveRcwlRight = (rr ? 1 : 0);
 
   if (liveWindowStartMs == 0) liveWindowStartMs = nowMs;
 
@@ -370,6 +382,8 @@ static String settingsToJson() {
 
   // New canonical keys
   body += "\"MOTION_HOLD_MILISECONDS\":"; body += String(settings_MOTION_HOLD_MILISECONDS); body += ",";
+  body += "\"FADE_IN_MILISECONDS\":"; body += String(settings_FADE_IN_MILISECONDS); body += ",";
+  body += "\"FADE_OUT_MILISECONDS\":"; body += String(settings_FADE_OUT_MILISECONDS); body += ",";
   body += "\"EVENTS_TO_TRIGGER\":"; body += String(settings_EVENTS_TO_TRIGGER); body += ",";
   body += "\"RCWL_MIN_ACTIVE_MILISECONDS\":"; body += String(settings_RCWL_MIN_ACTIVE_MILISECONDS); body += ",";
 
@@ -465,6 +479,9 @@ static void clampTimingSane() {
 
   settings_MOTION_HOLD_MILISECONDS = clampULong((long)settings_MOTION_HOLD_MILISECONDS, 0, 60000UL);
   settings_RCWL_MIN_ACTIVE_MILISECONDS = clampULong((long)settings_RCWL_MIN_ACTIVE_MILISECONDS, 0, 60000UL);
+
+  settings_FADE_IN_MILISECONDS = clampULong((long)settings_FADE_IN_MILISECONDS, 0, 10000UL);
+  settings_FADE_OUT_MILISECONDS = clampULong((long)settings_FADE_OUT_MILISECONDS, 0, 10000UL);
 }
 
 static void clampAdaptiveSane() {
@@ -477,7 +494,7 @@ static void clampAdaptiveSane() {
   settings_NOISE_OFFSET_LEFT = clampInt(settings_NOISE_OFFSET_LEFT, -1023, 1023);
   settings_NOISE_OFFSET_RIGHT = clampInt(settings_NOISE_OFFSET_RIGHT, -1023, 1023);
 
-  settings_NOISE_AVERAGE_UPDATE_SPEED = clampInt(settings_NOISE_AVERAGE_UPDATE_SPEED, 4, 12);
+  settings_NOISE_AVERAGE_UPDATE_SPEED = clampInt(settings_NOISE_AVERAGE_UPDATE_SPEED, 4, 1000);
 
   settings_EVENTS_TO_TRIGGER = clampInt(settings_EVENTS_TO_TRIGGER, 1, 20);
 
@@ -526,6 +543,9 @@ static bool readSettingsFromSD() {
   // Motion hold (new + legacy)
   if (jsonReadInt(json, "MOTION_HOLD_MILISECONDS", li)) settings_MOTION_HOLD_MILISECONDS = (unsigned long)li;
   if (jsonReadInt(json, "MOTION_HOLD_MS", li)) settings_MOTION_HOLD_MILISECONDS = (unsigned long)li;
+
+  if (jsonReadInt(json, "FADE_IN_MILISECONDS", li)) settings_FADE_IN_MILISECONDS = (unsigned long)li;
+  if (jsonReadInt(json, "FADE_OUT_MILISECONDS", li)) settings_FADE_OUT_MILISECONDS = (unsigned long)li;
 
   // RCWL (new + legacy)
   if (jsonReadInt(json, "RCWL_MIN_ACTIVE_MILISECONDS", li)) settings_RCWL_MIN_ACTIVE_MILISECONDS = (unsigned long)li;
@@ -587,6 +607,9 @@ static void pushAllSettingsToArduino() {
 
   sendCmdToArduino("MOTION_HOLD_MILISECONDS", String(settings_MOTION_HOLD_MILISECONDS));
 
+  sendCmdToArduino("FADE_IN_MILISECONDS", String(settings_FADE_IN_MILISECONDS));
+  sendCmdToArduino("FADE_OUT_MILISECONDS", String(settings_FADE_OUT_MILISECONDS));
+
   // Events
   sendCmdToArduino("EVENTS_TO_TRIGGER", String(settings_EVENTS_TO_TRIGGER));
 
@@ -614,12 +637,19 @@ static void handleApiLive() {
 
   String body = "{";
   body += "\"ok\":true,";
+
   body += "\"hb_left_avg\":"; body += String(liveAvgL); body += ",";
   body += "\"hb_right_avg\":"; body += String(liveAvgR); body += ",";
   body += "\"hb_left_absavg\":"; body += String(liveAbsAvgL); body += ",";
   body += "\"hb_right_absavg\":"; body += String(liveAbsAvgR); body += ",";
   body += "\"hb_left_last\":"; body += String(liveLastL); body += ",";
   body += "\"hb_right_last\":"; body += String(liveLastR); body += ",";
+
+  body += "\"rcwl_left\":"; body += String(liveRcwlLeft); body += ",";
+  body += "\"rcwl_right\":"; body += String(liveRcwlRight); body += ",";
+  body += "\"ov_left\":"; body += String(liveOvLeft); body += ",";
+  body += "\"ov_right\":"; body += String(liveOvRight); body += ",";
+
   body += "\"age_ms\":"; body += String(age);
   body += "}";
 
@@ -834,6 +864,9 @@ static bool applySettingKeyValue(const String &key, const String &val) {
     settings_MOTION_HOLD_MILISECONDS = (unsigned long)v.toInt();
     return true;
   }
+
+  if (k == "FADE_IN_MILISECONDS") { settings_FADE_IN_MILISECONDS = (unsigned long)v.toInt(); return true; }
+  if (k == "FADE_OUT_MILISECONDS") { settings_FADE_OUT_MILISECONDS = (unsigned long)v.toInt(); return true; }
 
   // Events
   if (k == "EVENTS_TO_TRIGGER") { settings_EVENTS_TO_TRIGGER = v.toInt(); return true; }
@@ -1071,15 +1104,21 @@ static void handleUartLine(const String &line, unsigned long nowMs) {
   if (!parseDataLine(s, l, r, rl, rr, ledL, ledR, ovL, ovR)) return;
 
   // Feed live rolling average (about 1s)
-  liveFeedSample(l, r, nowMs);
+  liveFeedSample(l, r, rl, rr, nowMs);
+
+  // store latest RCWL raw (add these globals near the live* vars)
+  liveRcwlLeft = (rl ? 1 : 0);
+  liveRcwlRight = (rr ? 1 : 0);
+  liveOvLeft = (ovL ? 1 : 0);
+  liveOvRight = (ovR ? 1 : 0);
 
   // Only log to SD when logging is enabled
   if (loggingEnabled && sdOk) {
     unsigned long ts = nowMs - logStartMs;
 
     int n = snprintf(outbuf + outlen, OUTBUF_MAX - outlen,
-                 "%d, %d, %d, %d, %d, %d, %d, %d, %lu\n",
-                 l, r, rl, rr, ledL, ledR, ovL, ovR, (unsigned long)ts);
+                     "%d, %d, %d, %d, %d, %d, %d, %d, %lu\n",
+                     l, r, rl, rr, ledL, ledR, ovL, ovR, (unsigned long)ts);
 
     if (n > 0 && (outlen + n) < OUTBUF_MAX) {
       outlen += n;
@@ -1090,6 +1129,7 @@ static void handleUartLine(const String &line, unsigned long nowMs) {
     }
   }
 }
+
 
 void setup() {
   Serial.begin(115200);
