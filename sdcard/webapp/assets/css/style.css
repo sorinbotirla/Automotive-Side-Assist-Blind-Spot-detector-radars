@@ -223,11 +223,12 @@ a:active {
 }
 
 .settingsGrid .row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 0;
+  display: grid;
+  grid-template-columns: 30% 1fr auto;
+  gap: 12px;
+  padding: 12px 0;
   border-bottom: 1px solid var(--line);
+  align-items: start; /* <-- key change */
 }
 
 .settingsGrid .row:last-child {
@@ -235,11 +236,11 @@ a:active {
 }
 
 .settingsGrid .label {
-  width: 220px;
   color: var(--muted);
   font-weight: 700;
   font-size: 13px;
   letter-spacing: 0.2px;
+  padding-top: 10px;
 }
 
 .settingsGrid .field {
@@ -301,4 +302,101 @@ a:active {
     width: 100%;
     text-align: center;
   }
+}
+.settingsGrid .help { font-size: 12px; opacity: 0.75; margin-top: 4px; line-height: 1.2; }
+.settingsGrid .tools {
+  /* display: flex; */
+  align-items: unset; /* <-- important */
+  justify-content: flex-end;
+  gap: 8px;
+  /* min-width: 110px; */
+  text-align: right;
+}
+.btnDefault {
+  min-height: 36px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line2);
+  background: var(--btn-bg);
+  color: var(--text);
+  font-weight: 600;
+  cursor: pointer;
+  display: block !important;
+  width: auto !important;
+  margin: 0 0 10px;
+  min-width: 110px;
+}
+.btnDefault:hover {
+  background: var(--btn-bg2);
+}
+.defVal {font-size: 12px;opacity: 0.75;display: block !important;}
+.settingsSection {
+  margin-top: 18px;
+}
+
+.settingsColumns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.settingsPanel {
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.03);
+  border-radius: var(--radius);
+  padding: 12px;
+  box-shadow: var(--shadow);
+}
+
+.panelTitle {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+
+.liveHud { display:flex; gap:12px; margin:12px 0 18px; }
+.liveCard {
+  flex: 1;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid var(--line2);
+  background: linear-gradient(
+          180deg,
+          rgba(255,255,255,0.06),
+          rgba(255,255,255,0.02)
+  );
+  box-shadow: var(--shadow);
+}
+.liveTitle {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.liveValue {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.liveSub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+@media (max-width: 720px){
+  .liveHud { flex-direction:column; }
+}
+
+.stateOn {
+  color: #3bd671;
+  font-weight: 700;
+}
+
+.stateOff {
+  color: #ff4b4b;
+  font-weight: 700;
 }

@@ -40,6 +40,20 @@ var RadarLogger = function(){
         timersByKey: {}
     };
 
+    _self.settingsCache = {};
+    _self.uiLoading = 0;
+
+    _self.liveTimer = null;
+
+    _self.keyAliases = {
+        "NOISE_ALPHA_SHIFT": "NOISE_AVERAGE_UPDATE_SPEED",
+        "MOTION_HOLD_MS": "MOTION_HOLD_MILISECONDS",
+        "RCWL_MIN_ACTIVE_MS": "RCWL_MIN_ACTIVE_MILISECONDS",
+        "SAMPLE_PERIOD_US": "SAMPLE_PERIOD_MICROSECONDS",
+        "MIN_PERIOD_US": "MIN_PERIOD_MICROSECONDS",
+        "MAX_PERIOD_US": "MAX_PERIOD_MICROSECONDS"
+    };
+
     _self.qs = function(name){
         var re = new RegExp("[?&]" + name + "=([^&]+)"),
             m = re.exec(window.location.search);
@@ -92,6 +106,36 @@ var RadarLogger = function(){
         }
     };
 
+    _self.normalizeKeyForSend = function(key){
+        if (_self.keyAliases[key]) return _self.keyAliases[key];
+        return key;
+    };
+
+    _self.isValidIntString = function(v){
+        return (typeof v === "string") && (/^-?\d+$/.test($.trim(v)));
+    };
+
+    _self.setFieldValueIfExists = function(id, val){
+        var $el = $("#" + id);
+        if (!$el.length) return;
+        $el.val(val);
+    };
+
+    _self.setSelectBoolIfExists = function(id, boolVal){
+        var $el = $("#" + id);
+        if (!$el.length) return;
+        $el.val(boolVal ? "true" : "false");
+    };
+
+    _self.pickFirst = function(o, keys){
+        var i = 0, k = "";
+        for(i=0;i<keys.length;i++){
+            k = keys[i];
+            if (typeof o[k] !== "undefined") return o[k];
+        }
+        return undefined;
+    };
+
     _self.handleEvents = function(){
         if(document.getElementById("startLog")){
             $("#startLog").on("click", function(e){ e.preventDefault(); _self.startLog(); });
@@ -127,25 +171,65 @@ var RadarLogger = function(){
             $("#saveSettings").on("click", function(e){ e.preventDefault(); _self.settingsSave(); });
         }
 
+        $(document).on("click", ".btnDefault", function(e){
+            e.preventDefault();
+            if (_self.uiLoading) return;
+
+            var $b = $(this),
+                key = $b.attr("data-key") || "",
+                defVal = $b.attr("data-default");
+
+            if (!key || typeof defVal === "undefined") return;
+
+            var $field = $("#" + key);
+            if ($field.length) {
+                if ($field.is("select")) $field.val(String(defVal));
+                else $field.val(defVal);
+            }
+
+            _self.settingsCache[key] = String(defVal);
+            _self.settingsSetNow(key, String(defVal));
+        });
+
         if(_self.state.isSettingsPage){
             $(document).on("input", ".settingsGrid input", function(e){
+                if (_self.uiLoading) return;
+
                 var id = $(this).attr("id") || "",
                     val = $(this).val();
+
                 if(!id) return;
+                if (!_self.isValidIntString(String(val))) return;
+
                 _self.settingsSetDebounced(id, val);
             });
 
             $(document).on("blur", ".settingsGrid input", function(e){
+                if (_self.uiLoading) return;
+
                 var id = $(this).attr("id") || "",
                     val = $(this).val();
+
                 if(!id) return;
+
+                if (!_self.isValidIntString(String(val))) {
+                    if (typeof _self.settingsCache[id] !== "undefined") {
+                        $(this).val(_self.settingsCache[id]);
+                    }
+                    return;
+                }
+
                 _self.settingsSetNow(id, val);
             });
 
             $(document).on("change", ".settingsGrid select", function(e){
+                if (_self.uiLoading) return;
+
                 var id = $(this).attr("id") || "",
                     val = $(this).val();
+
                 if(!id) return;
+
                 _self.settingsSetNow(id, val);
             });
         }
@@ -179,9 +263,15 @@ var RadarLogger = function(){
     };
 
     _self.settingsSet = function(key, value, seq){
-        var url = "/api/settings/set?key=" + encodeURIComponent(key) + "&value=" + encodeURIComponent(value);
+        var sendKey = _self.normalizeKeyForSend(key);
+        var sendValue = value;
 
-        _self.setStatus("Applying " + key + " = " + value, false);
+        if (value === true) sendValue = "true";
+        if (value === false) sendValue = "false";
+
+        var url = "/api/settings/set?key=" + encodeURIComponent(sendKey) + "&value=" + encodeURIComponent(sendValue);
+
+        _self.setStatus("Applying " + sendKey + " = " + sendValue, false);
 
         _self.apiGet(url, function(code, txt){
             if (_self.pending.latestSeqByKey[key] !== seq) return;
@@ -196,11 +286,68 @@ var RadarLogger = function(){
                     ack = (o && o.ack) ? o.ack : "";
 
                 if (ack) _self.setAck(ack);
-                _self.setStatus("Applied: " + key + " = " + value, false);
+
+                _self.settingsCache[key] = sendValue;
+                _self.setStatus("Applied: " + sendKey + " = " + sendValue, false);
             }catch(e){
                 _self.setStatus("set parse error", true);
             }
         });
+    };
+
+    _self.startLiveHud = function(){
+        if (_self.liveTimer) return;
+
+        if (!document.getElementById("hbLeftAvg") && !document.getElementById("hbRightAvg")) return;
+
+        var setRcwlState = function($el, on){
+            if(!$el || !$el.length) return;
+
+            $el.removeClass("stateOn stateOff");
+
+            if(on){
+                $el.addClass("stateOn");
+                $el.text("RCWL ON");
+            } else {
+                $el.addClass("stateOff");
+                $el.text("RCWL OFF");
+            }
+        };
+
+        var tick = function(){
+            _self.apiGet("/api/live", function(code, txt){
+                if(code !== 200 || !txt) return;
+
+                try{
+                    var o = JSON.parse(txt);
+                    if(!o || !o.ok) return;
+
+                    // Prefer last sample (more responsive for "alive" display)
+                    if (document.getElementById("hbLeftAvg")) {
+                        if (typeof o.hb_left_last !== "undefined") $("#hbLeftAvg").text(String(o.hb_left_last));
+                        else if (typeof o.hb_left_avg !== "undefined") $("#hbLeftAvg").text(String(o.hb_left_avg));
+                    }
+
+                    if (document.getElementById("hbRightAvg")) {
+                        if (typeof o.hb_right_last !== "undefined") $("#hbRightAvg").text(String(o.hb_right_last));
+                        else if (typeof o.hb_right_avg !== "undefined") $("#hbRightAvg").text(String(o.hb_right_avg));
+                    }
+
+                    var rl = (typeof o.rcwl_left_raw !== "undefined") ? o.rcwl_left_raw :
+                        ((typeof o.rcwl_left !== "undefined") ? o.rcwl_left : 0);
+
+                    var rr = (typeof o.rcwl_right_raw !== "undefined") ? o.rcwl_right_raw :
+                        ((typeof o.rcwl_right !== "undefined") ? o.rcwl_right : 0);
+
+                    if (document.getElementById("rcwlLeftSub")) setRcwlState($("#rcwlLeftSub"), !!rl);
+                    if (document.getElementById("rcwlRightSub")) setRcwlState($("#rcwlRightSub"), !!rr);
+
+                }catch(e){}
+            });
+        };
+
+        tick();
+        _self.liveTimer = setInterval(tick, 500);
     };
 
     _self.renderViewerShell = function(){
@@ -474,6 +621,9 @@ var RadarLogger = function(){
         for(i=0;i<lines.length;i++){
             var line = $.trim(lines[i]),
                 p = null,
+                ints = [],
+                j = 0,
+                v = 0,
                 l = 0, r = 0, rl = 0, rr = 0, ledL = 0, ledR = 0,
                 tsMs = 0,
                 t = 0;
@@ -481,25 +631,26 @@ var RadarLogger = function(){
             if(!line) continue;
 
             p = line.split(",");
-            if(p.length < 5) continue;
+            if(!p || p.length < 5) continue;
 
-            l = parseInt($.trim(p[0]), 10);
-            r = parseInt($.trim(p[1]), 10);
-            rl = parseInt($.trim(p[2]), 10);
-            rr = parseInt($.trim(p[3]), 10);
+            for(j=0;j<p.length;j++){
+                v = parseInt($.trim(p[j]), 10);
+                if (!isNaN(v)) ints.push(v);
+            }
 
-            if(isNaN(l) || isNaN(r) || isNaN(rl) || isNaN(rr)) continue;
+            if (ints.length < 5) continue;
 
-            if (p.length >= 7) {
-                ledL = parseInt($.trim(p[4]), 10);
-                ledR = parseInt($.trim(p[5]), 10);
-                tsMs = parseInt($.trim(p[6]), 10);
-                if (isNaN(ledL)) ledL = 0;
-                if (isNaN(ledR)) ledR = 0;
-                if (isNaN(tsMs)) tsMs = 0;
+            l = ints[0];
+            r = ints[1];
+            rl = ints[2];
+            rr = ints[3];
+
+            tsMs = ints[ints.length - 1];
+
+            if (ints.length >= 7) {
+                ledL = ints[4];
+                ledR = ints[5];
             } else {
-                tsMs = parseInt($.trim(p[4]), 10);
-                if (isNaN(tsMs)) tsMs = 0;
                 ledL = 0;
                 ledR = 0;
             }
@@ -570,48 +721,59 @@ var RadarLogger = function(){
     };
 
     _self.settingsPopulate = function(o){
-        var v = "";
-
         if(!o) return;
 
-        v = (typeof o.MIN_AMPLITUDE !== "undefined") ? o.MIN_AMPLITUDE : "";
-        $("#MIN_AMPLITUDE").val(v);
+        _self.uiLoading = 1;
 
-        v = (typeof o.MIN_AMPLITUDE_LEFT !== "undefined") ? o.MIN_AMPLITUDE_LEFT : "";
-        $("#MIN_AMPLITUDE_LEFT").val(v);
+        var sp = _self.pickFirst(o, ["SAMPLE_PERIOD_MICROSECONDS", "SAMPLE_PERIOD_US"]);
+        if (typeof sp !== "undefined") { _self.settingsCache["SAMPLE_PERIOD_MICROSECONDS"] = sp; _self.setFieldValueIfExists("SAMPLE_PERIOD_MICROSECONDS", sp); }
 
-        v = (typeof o.MIN_AMPLITUDE_RIGHT !== "undefined") ? o.MIN_AMPLITUDE_RIGHT : "";
-        $("#MIN_AMPLITUDE_RIGHT").val(v);
+        var mn = _self.pickFirst(o, ["MIN_PERIOD_MICROSECONDS", "MIN_PERIOD_US"]);
+        if (typeof mn !== "undefined") { _self.settingsCache["MIN_PERIOD_MICROSECONDS"] = mn; _self.setFieldValueIfExists("MIN_PERIOD_MICROSECONDS", mn); }
 
-        v = (typeof o.NOISE_MULT_LEFT !== "undefined") ? o.NOISE_MULT_LEFT : "";
-        $("#NOISE_MULT_LEFT").val(v);
+        var mx = _self.pickFirst(o, ["MAX_PERIOD_MICROSECONDS", "MAX_PERIOD_US"]);
+        if (typeof mx !== "undefined") { _self.settingsCache["MAX_PERIOD_MICROSECONDS"] = mx; _self.setFieldValueIfExists("MAX_PERIOD_MICROSECONDS", mx); }
 
-        v = (typeof o.NOISE_MULT_RIGHT !== "undefined") ? o.NOISE_MULT_RIGHT : "";
-        $("#NOISE_MULT_RIGHT").val(v);
+        var mh = _self.pickFirst(o, ["MOTION_HOLD_MILISECONDS", "MOTION_HOLD_MS"]);
+        if (typeof mh !== "undefined") { _self.settingsCache["MOTION_HOLD_MILISECONDS"] = mh; _self.setFieldValueIfExists("MOTION_HOLD_MILISECONDS", mh); }
 
-        v = (typeof o.NOISE_OFFSET_LEFT !== "undefined") ? o.NOISE_OFFSET_LEFT : "";
-        $("#NOISE_OFFSET_LEFT").val(v);
+        if (typeof o.EVENTS_TO_TRIGGER !== "undefined") {
+            _self.settingsCache["EVENTS_TO_TRIGGER"] = o.EVENTS_TO_TRIGGER;
+            _self.setFieldValueIfExists("EVENTS_TO_TRIGGER", o.EVENTS_TO_TRIGGER);
+        }
 
-        v = (typeof o.NOISE_OFFSET_RIGHT !== "undefined") ? o.NOISE_OFFSET_RIGHT : "";
-        $("#NOISE_OFFSET_RIGHT").val(v);
+        var rc = _self.pickFirst(o, ["RCWL_MIN_ACTIVE_MILISECONDS", "RCWL_MIN_ACTIVE_MS"]);
+        if (typeof rc !== "undefined") { _self.settingsCache["RCWL_MIN_ACTIVE_MILISECONDS"] = rc; _self.setFieldValueIfExists("RCWL_MIN_ACTIVE_MILISECONDS", rc); }
 
-        v = (typeof o.NOISE_ALPHA_SHIFT !== "undefined") ? o.NOISE_ALPHA_SHIFT : "";
-        $("#NOISE_ALPHA_SHIFT").val(v);
+        if (typeof o.ENABLE_RCWL_LEFT !== "undefined") { _self.settingsCache["ENABLE_RCWL_LEFT"] = o.ENABLE_RCWL_LEFT ? "true" : "false"; _self.setSelectBoolIfExists("ENABLE_RCWL_LEFT", !!o.ENABLE_RCWL_LEFT); }
+        if (typeof o.ENABLE_RCWL_RIGHT !== "undefined") { _self.settingsCache["ENABLE_RCWL_RIGHT"] = o.ENABLE_RCWL_RIGHT ? "true" : "false"; _self.setSelectBoolIfExists("ENABLE_RCWL_RIGHT", !!o.ENABLE_RCWL_RIGHT); }
 
-        v = (typeof o.MOTION_HOLD_MS !== "undefined") ? o.MOTION_HOLD_MS : "";
-        $("#MOTION_HOLD_MS").val(v);
+        if (typeof o.MIN_AMPLITUDE_LEFT !== "undefined") { _self.settingsCache["MIN_AMPLITUDE_LEFT"] = o.MIN_AMPLITUDE_LEFT; _self.setFieldValueIfExists("MIN_AMPLITUDE_LEFT", o.MIN_AMPLITUDE_LEFT); }
+        if (typeof o.MIN_AMPLITUDE_RIGHT !== "undefined") { _self.settingsCache["MIN_AMPLITUDE_RIGHT"] = o.MIN_AMPLITUDE_RIGHT; _self.setFieldValueIfExists("MIN_AMPLITUDE_RIGHT", o.MIN_AMPLITUDE_RIGHT); }
 
-        v = (typeof o.EVENTS_TO_TRIGGER !== "undefined") ? o.EVENTS_TO_TRIGGER : "";
-        $("#EVENTS_TO_TRIGGER").val(v);
+        if (typeof o.NOISE_MULT_LEFT !== "undefined") { _self.settingsCache["NOISE_MULT_LEFT"] = o.NOISE_MULT_LEFT; _self.setFieldValueIfExists("NOISE_MULT_LEFT", o.NOISE_MULT_LEFT); }
+        if (typeof o.NOISE_MULT_RIGHT !== "undefined") { _self.settingsCache["NOISE_MULT_RIGHT"] = o.NOISE_MULT_RIGHT; _self.setFieldValueIfExists("NOISE_MULT_RIGHT", o.NOISE_MULT_RIGHT); }
 
-        v = (typeof o.RCWL_MIN_ACTIVE_MS !== "undefined") ? o.RCWL_MIN_ACTIVE_MS : "";
-        $("#RCWL_MIN_ACTIVE_MS").val(v);
+        if (typeof o.NOISE_OFFSET_LEFT !== "undefined") { _self.settingsCache["NOISE_OFFSET_LEFT"] = o.NOISE_OFFSET_LEFT; _self.setFieldValueIfExists("NOISE_OFFSET_LEFT", o.NOISE_OFFSET_LEFT); }
+        if (typeof o.NOISE_OFFSET_RIGHT !== "undefined") { _self.settingsCache["NOISE_OFFSET_RIGHT"] = o.NOISE_OFFSET_RIGHT; _self.setFieldValueIfExists("NOISE_OFFSET_RIGHT", o.NOISE_OFFSET_RIGHT); }
 
-        v = (o.ENABLE_RCWL_LEFT) ? "true" : "false";
-        $("#ENABLE_RCWL_LEFT").val(v);
+        var nu = _self.pickFirst(o, ["NOISE_AVERAGE_UPDATE_SPEED", "NOISE_ALPHA_SHIFT"]);
+        if (typeof nu !== "undefined") {
+            _self.settingsCache["NOISE_AVERAGE_UPDATE_SPEED"] = nu;
+            _self.setFieldValueIfExists("NOISE_AVERAGE_UPDATE_SPEED", nu);
+        }
 
-        v = (o.ENABLE_RCWL_RIGHT) ? "true" : "false";
-        $("#ENABLE_RCWL_RIGHT").val(v);
+        // Fade settings (new)
+        if (typeof o.FADE_IN_MILISECONDS !== "undefined") {
+            _self.settingsCache["FADE_IN_MILISECONDS"] = o.FADE_IN_MILISECONDS;
+            _self.setFieldValueIfExists("FADE_IN_MILISECONDS", o.FADE_IN_MILISECONDS);
+        }
+        if (typeof o.FADE_OUT_MILISECONDS !== "undefined") {
+            _self.settingsCache["FADE_OUT_MILISECONDS"] = o.FADE_OUT_MILISECONDS;
+            _self.setFieldValueIfExists("FADE_OUT_MILISECONDS", o.FADE_OUT_MILISECONDS);
+        }
+
+        _self.uiLoading = 0;
     };
 
     _self.settingsLoad = function(){
@@ -672,6 +834,7 @@ var RadarLogger = function(){
 
         if(_self.state.isSettingsPage){
             _self.settingsLoad();
+            _self.startLiveHud();
             return;
         }
 
