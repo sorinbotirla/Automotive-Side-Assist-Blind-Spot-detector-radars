@@ -102,7 +102,7 @@ static void ackKV(const String &key, const String &val) {
 }
 
 // PWM fade + photoresistor settings
-unsigned long FADE_IN_MILISECONDS = 600;
+unsigned long FADE_IN_MILISECONDS = 300;
 unsigned long FADE_OUT_MILISECONDS = 1500;
 
 bool NIGHT_DIMMING_ENABLE = false;
@@ -421,7 +421,7 @@ public:
     pinMode(_pin, OUTPUT);
     _cur = 0;
     _mode = IDLE;
-    writePwm(0);
+    writeStableOrPwm(0);
   }
 
   void fadeTo(uint8_t target, unsigned long durationMs) {
@@ -431,26 +431,38 @@ public:
     _startB = currentNow;
     _endB = target;
     _t0 = now;
-    _dur = (durationMs == 0) ? 1 : durationMs;
+
+    if (durationMs == 0) {
+      _dur = 1;
+      _mode = IDLE;
+      _cur = _endB;
+      writeStableOrPwm(_cur);
+      return;
+    }
+
+    _dur = durationMs;
     _mode = FADE;
 
     _cur = currentNow;
-    writePwm(_cur);
+    writeStableOrPwm(_cur);
   }
 
   void update() {
     if (_mode == IDLE) return;
 
     unsigned long now = millis();
+    unsigned long dt = (unsigned long)(now - _t0);
+
+    if (dt >= _dur) {
+      _cur = _endB;
+      _mode = IDLE;
+      writeStableOrPwm(_cur);
+      return;
+    }
+
     uint8_t b = interpolate(now, _t0, _dur, _startB, _endB);
     _cur = b;
-    writePwm(_cur);
-
-    if ((unsigned long)(now - _t0) >= _dur) {
-      _cur = _endB;
-      writePwm(_cur);
-      _mode = IDLE;
-    }
+    writeStableOrPwm(_cur);
   }
 
   uint8_t current() const {
@@ -495,9 +507,15 @@ private:
     return (uint8_t)val;
   }
 
-  void writePwm(uint8_t logicalBrightness) const {
+  void writeStableOrPwm(uint8_t logicalBrightness) const {
     uint8_t out = _gamma ? gamma8(logicalBrightness) : logicalBrightness;
     if (_inverted) out = 255 - out;
+
+    if (_mode == IDLE && (logicalBrightness == 0 || logicalBrightness == 255)) {
+      digitalWrite(_pin, (out >= 128) ? HIGH : LOW);
+      return;
+    }
+
     analogWrite(_pin, out);
   }
 };
