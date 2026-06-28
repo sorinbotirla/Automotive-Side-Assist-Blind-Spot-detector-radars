@@ -12,14 +12,12 @@ static const int LEFT_RELAY_PIN = 8;
 static const int RIGHT_RELAY_PIN = 9;
 
 static const uint32_t STARTUP_TEST_MS = 2000;
-static const uint32_t HOLD_MS = 2000;
+static const uint32_t REVERSE_RELEASE_LOCKOUT_MS = 5000;
 static const uint32_t SIGNAL_HOLD_MS = 1200;
 static const uint32_t FAST_BLINK_MS = 150;
 
 static uint32_t bootMs = 0;
-
-static uint32_t leftLastAlertMs = 0;
-static uint32_t rightLastAlertMs = 0;
+static uint32_t reverseReleasedMs = 0;
 
 static uint32_t leftLastSignalMs = 0;
 static uint32_t rightLastSignalMs = 0;
@@ -28,8 +26,7 @@ static uint32_t leftBlinkMs = 0;
 static uint32_t rightBlinkMs = 0;
 
 static bool startupDone = false;
-static bool leftHadAlert = false;
-static bool rightHadAlert = false;
+static bool previousReverseActive = false;
 
 static bool leftBlinkState = false;
 static bool rightBlinkState = false;
@@ -94,28 +91,32 @@ void loop() {
     }
 
     startupDone = true;
-    leftHadAlert = false;
-    rightHadAlert = false;
     bothRelaysOff();
     return;
   }
 
-  if (digitalRead(REVERSE_PIN) == HIGH) {
-    leftHadAlert = false;
-    rightHadAlert = false;
+  bool reverseNow = digitalRead(REVERSE_PIN) == HIGH;
+
+  if (reverseNow) {
+    previousReverseActive = true;
     bothRelaysOff();
     return;
   }
 
-  if (digitalRead(LEFT_RADAR_ALERT_PIN) == HIGH) {
-    leftLastAlertMs = now;
-    leftHadAlert = true;
+  if (previousReverseActive && !reverseNow) {
+    previousReverseActive = false;
+    reverseReleasedMs = now;
+    bothRelaysOff();
+    return;
   }
 
-  if (digitalRead(RIGHT_RADAR_ALERT_PIN) == HIGH) {
-    rightLastAlertMs = now;
-    rightHadAlert = true;
+  if ((now - reverseReleasedMs) < REVERSE_RELEASE_LOCKOUT_MS) {
+    bothRelaysOff();
+    return;
   }
+
+  bool leftRadarActive = digitalRead(LEFT_RADAR_ALERT_PIN) == HIGH;
+  bool rightRadarActive = digitalRead(RIGHT_RADAR_ALERT_PIN) == HIGH;
 
   if (digitalRead(LEFT_SIGNAL_PIN) == HIGH) {
     leftLastSignalMs = now;
@@ -125,13 +126,10 @@ void loop() {
     rightLastSignalMs = now;
   }
 
-  bool leftRadarHeld = leftHadAlert && ((now - leftLastAlertMs) <= HOLD_MS);
-  bool rightRadarHeld = rightHadAlert && ((now - rightLastAlertMs) <= HOLD_MS);
-
   bool leftSignalHeld = (now - leftLastSignalMs) <= SIGNAL_HOLD_MS;
   bool rightSignalHeld = (now - rightLastSignalMs) <= SIGNAL_HOLD_MS;
 
-  if (leftRadarHeld && leftSignalHeld) {
+  if (leftRadarActive && leftSignalHeld) {
     updateBlink(now, leftBlinkMs, leftBlinkState);
 
     if (leftBlinkState) {
@@ -139,7 +137,7 @@ void loop() {
     } else {
       leftRelayOff();
     }
-  } else if (leftRadarHeld) {
+  } else if (leftRadarActive) {
     leftRelayOn();
     leftBlinkState = false;
     leftBlinkMs = now;
@@ -149,7 +147,7 @@ void loop() {
     leftBlinkMs = now;
   }
 
-  if (rightRadarHeld && rightSignalHeld) {
+  if (rightRadarActive && rightSignalHeld) {
     updateBlink(now, rightBlinkMs, rightBlinkState);
 
     if (rightBlinkState) {
@@ -157,7 +155,7 @@ void loop() {
     } else {
       rightRelayOff();
     }
-  } else if (rightRadarHeld) {
+  } else if (rightRadarActive) {
     rightRelayOn();
     rightBlinkState = false;
     rightBlinkMs = now;
